@@ -44,19 +44,19 @@ class PermissionService {
     }
   }
 
-  // Convert react-native-permissions result to expo-like status
+  // Convert react-native-permissions result to status
   convertResult(result) {
     switch (result) {
       case RESULTS.GRANTED:
         return 'granted';
       case RESULTS.DENIED:
-        return 'undetermined'; // Can still ask
+        return 'denied'; // Can still ask on Android
       case RESULTS.BLOCKED:
-        return 'denied'; // Need to go to settings
+        return 'blocked'; // Need to go to settings
       case RESULTS.UNAVAILABLE:
-        return 'denied';
+        return 'unavailable';
       default:
-        return 'undetermined';
+        return 'denied';
     }
   }
 
@@ -87,14 +87,35 @@ class PermissionService {
   // Open app settings directly
   async openAppSettings() {
     try {
-      await openSettings();
+      if (Platform.OS === 'android') {
+        // Android: Use native module to open permissions page directly
+        const { NativeModules } = require('react-native');
+        const { PermissionSettings } = NativeModules;
+
+        if (PermissionSettings) {
+          await PermissionSettings.openAppPermissions();
+        } else {
+          // Fallback if native module not available
+          await Linking.openSettings();
+        }
+      } else {
+        // iOS: use react-native-permissions
+        await openSettings();
+      }
     } catch (error) {
       console.error('Failed to open settings:', error);
-      Alert.alert(
-        'Open Settings Manually',
-        'Please go to Settings > VoIP App to enable permissions.',
-        [{ text: 'OK' }]
-      );
+      // Fallback to standard method
+      try {
+        await Linking.openSettings();
+      } catch (e) {
+        Alert.alert(
+          'Open Settings Manually',
+          Platform.OS === 'android'
+            ? 'Go to Settings > Apps > VoipAppRN > Permissions'
+            : 'Go to Settings > VoIP App',
+          [{ text: 'OK' }]
+        );
+      }
     }
   }
 
@@ -102,9 +123,13 @@ class PermissionService {
   showPermissionDeniedAlert(permissionType) {
     const permissionName = permissionType === 'microphone' ? 'Microphone' : 'Camera';
 
+    const message = Platform.OS === 'android'
+      ? `This app needs ${permissionName.toLowerCase()} access to make calls.\n\nAfter opening, tap "Permissions" → enable ${permissionName}.`
+      : `This app needs ${permissionName.toLowerCase()} access to make calls. Please enable it in Settings.`;
+
     Alert.alert(
       `${permissionName} Access Required`,
-      `This app needs ${permissionName.toLowerCase()} access to make calls. Please enable it in Settings.`,
+      message,
       [
         { text: 'Later', style: 'cancel' },
         {
@@ -115,7 +140,7 @@ class PermissionService {
     );
   }
 
-  // Check and request voice call permissions
+  // Check and request voice call permissions (same flow for iOS and Android)
   async requestVoiceCallPermissions() {
     const micStatus = await this.checkMicrophonePermission();
 
@@ -123,26 +148,12 @@ class PermissionService {
       return true;
     }
 
-    if (micStatus === 'denied') {
-      this.showPermissionDeniedAlert('microphone');
-      return false;
-    }
-
-    // First time asking
-    const granted = await this.requestMicrophonePermission();
-
-    if (!granted) {
-      Alert.alert(
-        'Cannot Make Call',
-        'Microphone access is required to make voice calls.',
-        [{ text: 'OK' }]
-      );
-    }
-
-    return granted;
+    // Permission not granted - show custom dialog with Open Settings (like iOS)
+    this.showPermissionDeniedAlert('microphone');
+    return false;
   }
 
-  // Check and request video call permissions
+  // Check and request video call permissions (same flow for iOS and Android)
   async requestVideoCallPermissions() {
     const micStatus = await this.checkMicrophonePermission();
     const camStatus = await this.checkCameraPermission();
@@ -151,46 +162,23 @@ class PermissionService {
       return true;
     }
 
-    // Check if any permission is denied
-    const deniedPermissions = [];
-    if (micStatus === 'denied') deniedPermissions.push('microphone');
-    if (camStatus === 'denied') deniedPermissions.push('camera');
+    // Permission not granted - show custom dialog with Open Settings
+    const missingPermissions = [];
+    if (micStatus !== 'granted') missingPermissions.push('microphone');
+    if (camStatus !== 'granted') missingPermissions.push('camera');
 
-    if (deniedPermissions.length > 0) {
-      const permissionNames = deniedPermissions.join(' and ');
-      Alert.alert(
-        'Permission Required',
-        `This app needs ${permissionNames} access for video calls. Please enable it in Settings.`,
-        [
-          { text: 'Later', style: 'cancel' },
-          { text: 'Open Settings', onPress: () => this.openAppSettings() },
-        ]
-      );
-      return false;
-    }
+    const permissionNames = missingPermissions.join(' and ');
+    const message = `This app needs ${permissionNames} access for video calls. Please enable it in Settings.`;
 
-    // Request permissions that haven't been asked
-    let allGranted = true;
-
-    if (micStatus !== 'granted') {
-      const micGranted = await this.requestMicrophonePermission();
-      if (!micGranted) allGranted = false;
-    }
-
-    if (camStatus !== 'granted') {
-      const camGranted = await this.requestCameraPermission();
-      if (!camGranted) allGranted = false;
-    }
-
-    if (!allGranted) {
-      Alert.alert(
-        'Cannot Make Video Call',
-        'Microphone and camera access are required for video calls.',
-        [{ text: 'OK' }]
-      );
-    }
-
-    return allGranted;
+    Alert.alert(
+      'Permission Required',
+      message,
+      [
+        { text: 'Later', style: 'cancel' },
+        { text: 'Open Settings', onPress: () => this.openAppSettings() },
+      ]
+    );
+    return false;
   }
 
   // Check permissions for incoming calls

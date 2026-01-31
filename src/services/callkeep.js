@@ -1,7 +1,6 @@
-import RNCallKeep from 'react-native-callkeep';
 import { Platform } from 'react-native';
 
-// Simple UUID generator (không cần crypto)
+// Simple UUID generator
 const generateUUID = () => {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
@@ -10,18 +9,24 @@ const generateUUID = () => {
   });
 };
 
+// Only import RNCallKeep on iOS (Android has TurboModule issues)
+let RNCallKeep = null;
+if (Platform.OS === 'ios') {
+  RNCallKeep = require('react-native-callkeep').default;
+}
+
 const options = {
   ios: {
     appName: 'VoIP App',
-    supportsVideo: false,
+    supportsVideo: true,
     maximumCallGroups: '1',
     maximumCallsPerCallGroup: '1',
   },
   android: {
-    alertTitle: 'Cấp quyền',
-    alertDescription: 'Ứng dụng cần quyền để quản lý cuộc gọi',
-    cancelButton: 'Hủy',
-    okButton: 'Đồng ý',
+    alertTitle: 'Permissions Required',
+    alertDescription: 'This app needs permission to manage calls',
+    cancelButton: 'Cancel',
+    okButton: 'OK',
     additionalPermissions: [],
     selfManaged: false,
   },
@@ -37,6 +42,13 @@ class CallKeepService {
   async setup() {
     if (this.isSetup) return;
 
+    // Only setup on iOS
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: Skipping setup on Android');
+      this.isSetup = true;
+      return;
+    }
+
     try {
       await RNCallKeep.setup(options);
       RNCallKeep.setAvailable(true);
@@ -44,14 +56,17 @@ class CallKeepService {
       console.log('CallKeep setup successful');
     } catch (error) {
       console.error('CallKeep setup error:', error);
-      // Không throw error vì CallKeep không bắt buộc phải hoạt động
     }
   }
 
-  // Hiển thị cuộc gọi đến (native UI)
   displayIncomingCall(callerId, callerName = 'Unknown') {
     const callUUID = generateUUID();
     this.currentCallId = callUUID;
+
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: displayIncomingCall (stub)', callerId);
+      return callUUID;
+    }
 
     try {
       RNCallKeep.displayIncomingCall(
@@ -59,7 +74,7 @@ class CallKeepService {
         callerId,
         callerName,
         'generic',
-        false // hasVideo
+        false
       );
     } catch (error) {
       console.error('Error displaying incoming call:', error);
@@ -68,10 +83,14 @@ class CallKeepService {
     return callUUID;
   }
 
-  // Bắt đầu cuộc gọi đi
   startCall(handle, callerName = 'Unknown') {
     const callUUID = generateUUID();
     this.currentCallId = callUUID;
+
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: startCall (stub)', handle);
+      return callUUID;
+    }
 
     try {
       RNCallKeep.startCall(callUUID, handle, callerName);
@@ -82,8 +101,12 @@ class CallKeepService {
     return callUUID;
   }
 
-  // Báo cuộc gọi được trả lời
   answerCall() {
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: answerCall (stub)');
+      return;
+    }
+
     if (this.currentCallId) {
       try {
         RNCallKeep.answerIncomingCall(this.currentCallId);
@@ -93,9 +116,15 @@ class CallKeepService {
     }
   }
 
-  // Kết thúc cuộc gọi
   endCall(callUUID = null) {
     const uuid = callUUID || this.currentCallId;
+
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: endCall (stub)');
+      this.currentCallId = null;
+      return;
+    }
+
     if (uuid) {
       try {
         RNCallKeep.endCall(uuid);
@@ -106,8 +135,13 @@ class CallKeepService {
     this.currentCallId = null;
   }
 
-  // Kết thúc tất cả cuộc gọi
   endAllCalls() {
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: endAllCalls (stub)');
+      this.currentCallId = null;
+      return;
+    }
+
     try {
       RNCallKeep.endAllCalls();
     } catch (error) {
@@ -116,8 +150,12 @@ class CallKeepService {
     this.currentCallId = null;
   }
 
-  // Cập nhật trạng thái cuộc gọi đã kết nối
   setCallConnected() {
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: setCallConnected (stub)');
+      return;
+    }
+
     if (this.currentCallId) {
       try {
         RNCallKeep.setCurrentCallActive(this.currentCallId);
@@ -127,8 +165,12 @@ class CallKeepService {
     }
   }
 
-  // Toggle mute
   setMuted(muted) {
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: setMuted (stub)', muted);
+      return;
+    }
+
     if (this.currentCallId) {
       try {
         RNCallKeep.setMutedCall(this.currentCallId, muted);
@@ -138,8 +180,12 @@ class CallKeepService {
     }
   }
 
-  // Toggle hold
   setOnHold(hold) {
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: setOnHold (stub)', hold);
+      return;
+    }
+
     if (this.currentCallId) {
       try {
         RNCallKeep.setOnHold(this.currentCallId, hold);
@@ -149,11 +195,14 @@ class CallKeepService {
     }
   }
 
-  // Đăng ký event handlers
   registerEvents(handlers) {
     this.handlers = handlers;
 
-    // Khi user trả lời từ native UI
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      console.log('CallKeep: registerEvents (stub)');
+      return;
+    }
+
     RNCallKeep.addEventListener('answerCall', ({ callUUID }) => {
       console.log('CallKeep: answerCall', callUUID);
       if (handlers.onAnswer) {
@@ -161,7 +210,6 @@ class CallKeepService {
       }
     });
 
-    // Khi user kết thúc từ native UI
     RNCallKeep.addEventListener('endCall', ({ callUUID }) => {
       console.log('CallKeep: endCall', callUUID);
       this.currentCallId = null;
@@ -170,7 +218,6 @@ class CallKeepService {
       }
     });
 
-    // Khi user toggle mute từ native UI
     RNCallKeep.addEventListener(
       'didPerformSetMutedCallAction',
       ({ muted, callUUID }) => {
@@ -181,7 +228,6 @@ class CallKeepService {
       }
     );
 
-    // Khi user toggle hold từ native UI
     RNCallKeep.addEventListener(
       'didToggleHoldCallAction',
       ({ hold, callUUID }) => {
@@ -192,7 +238,6 @@ class CallKeepService {
       }
     );
 
-    // Khi audio route thay đổi (speaker/earpiece)
     RNCallKeep.addEventListener(
       'didPerformDTMFAction',
       ({ digits, callUUID }) => {
@@ -204,8 +249,12 @@ class CallKeepService {
     );
   }
 
-  // Xóa tất cả listeners
   removeAllListeners() {
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      this.handlers = {};
+      return;
+    }
+
     RNCallKeep.removeEventListener('answerCall');
     RNCallKeep.removeEventListener('endCall');
     RNCallKeep.removeEventListener('didPerformSetMutedCallAction');
@@ -214,15 +263,13 @@ class CallKeepService {
     this.handlers = {};
   }
 
-  // Kiểm tra xem thiết bị có hỗ trợ CallKeep không
   async checkPhoneAccountEnabled() {
-    if (Platform.OS === 'android') {
-      return await RNCallKeep.checkPhoneAccountEnabled();
+    if (Platform.OS !== 'ios' || !RNCallKeep) {
+      return true;
     }
     return true;
   }
 
-  // Lấy call ID hiện tại
   getCurrentCallId() {
     return this.currentCallId;
   }
