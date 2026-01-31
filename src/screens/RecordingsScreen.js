@@ -9,6 +9,7 @@ import {
   Alert,
   Image,
   Platform,
+  TextInput,
 } from 'react-native';
 import { Colors, Spacing, FontSize, BorderRadius } from '../theme/colors';
 import Video from 'react-native-video';
@@ -133,6 +134,20 @@ const RecordingsScreen = () => {
   const [segmentsA, setSegmentsA] = useState([]); // Segments from Person A
   const [segmentsB, setSegmentsB] = useState([]); // Segments from Person B
 
+  // Dynamic URL states
+  const [urlA, setUrlA] = useState('');
+  const [urlB, setUrlB] = useState('');
+  const [isDownloadingA, setIsDownloadingA] = useState(false);
+  const [isDownloadingB, setIsDownloadingB] = useState(false);
+  const [downloadedA, setDownloadedA] = useState(false);
+  const [downloadedB, setDownloadedB] = useState(false);
+  const [dynamicMode, setDynamicMode] = useState(false); // Toggle between preset and dynamic
+  const [playingDynamic, setPlayingDynamic] = useState(null); // 'A', 'B', or null
+  const [dynamicCurrentTime, setDynamicCurrentTime] = useState(0);
+  const [dynamicDuration, setDynamicDuration] = useState(0);
+
+  const dynamicPlayerRef = useRef(null);
+
   // Merge segments from A and B, sort by timestamp
   const mergeConversation = (segsA, segsB) => {
     const allSegments = [
@@ -166,6 +181,153 @@ const RecordingsScreen = () => {
 
   const getModelPath = () => {
     return `${RNFS.DocumentDirectoryPath}/${MODEL_FILENAME}`;
+  };
+
+  // Download audio from URL
+  const downloadAudioFromUrl = async (url, speaker) => {
+    if (!url) {
+      Alert.alert('Error', `Please enter URL for ${speaker}`);
+      return false;
+    }
+
+    const setDownloading = speaker === 'A' ? setIsDownloadingA : setIsDownloadingB;
+    const setDownloaded = speaker === 'A' ? setDownloadedA : setDownloadedB;
+    const destPath = `${RNFS.DocumentDirectoryPath}/dynamic_${speaker.toLowerCase()}.wav`;
+
+    setDownloading(true);
+
+    try {
+      // Delete existing file if any
+      if (await RNFS.exists(destPath)) {
+        await RNFS.unlink(destPath);
+      }
+
+      const downloadResult = await RNFS.downloadFile({
+        fromUrl: url,
+        toFile: destPath,
+      }).promise;
+
+      if (downloadResult.statusCode === 200) {
+        setDownloaded(true);
+        setDownloading(false);
+        return true;
+      } else {
+        Alert.alert('Error', `Failed to download audio ${speaker}: ${downloadResult.statusCode}`);
+        setDownloading(false);
+        return false;
+      }
+    } catch (error) {
+      console.error('Download error:', error);
+      Alert.alert('Error', `Download failed: ${error.message}`);
+      setDownloading(false);
+      return false;
+    }
+  };
+
+  // Transcribe dynamic audio
+  const transcribeDynamicAudio = async (speaker) => {
+    if (!whisperContext) {
+      Alert.alert('Model not ready', 'Please download the Whisper model first');
+      return;
+    }
+
+    const audioPath = `${RNFS.DocumentDirectoryPath}/dynamic_${speaker.toLowerCase()}.wav`;
+
+    if (!(await RNFS.exists(audioPath))) {
+      Alert.alert('Error', `Please download audio ${speaker} first`);
+      return;
+    }
+
+    setIsTranscribing(true);
+
+    try {
+      console.log(`Transcribing dynamic audio ${speaker}:`, audioPath);
+
+      const { promise } = whisperContext.transcribe(audioPath, {
+        language: 'ja',
+        maxLen: 0,
+        tokenTimestamps: true,
+        wordTimestamps: true,
+      });
+
+      const transcribeResult = await promise;
+      console.log('Transcription result:', JSON.stringify(transcribeResult, null, 2));
+
+      const segments = transcribeResult?.segments || [];
+      const parsedSegments = segments.map(segment => ({
+        text: segment.text?.trim() || '',
+        startTime: (segment.t0 || 0) / 100,
+        endTime: (segment.t1 || 0) / 100,
+      })).filter(item => item.text && item.text !== '(音楽)' && item.text !== '');
+
+      if (speaker === 'A') {
+        setSegmentsA(parsedSegments);
+      } else {
+        setSegmentsB(parsedSegments);
+      }
+
+      const text = transcribeResult?.result || transcribeResult?.text ||
+        (segments.map(s => s.text).join(' ')) || 'No result';
+
+      setTranscriptionResults(prev => ({
+        ...prev,
+        [`dynamic${speaker}`]: text,
+      }));
+
+    } catch (error) {
+      console.error('Transcription error:', error);
+      Alert.alert('Error', `Transcription failed: ${error.message}`);
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  // Play dynamic audio
+  const playDynamicAudio = (speaker) => {
+    if (playingDynamic === speaker) {
+      setPlayingDynamic(null); // Pause
+    } else {
+      setPlayingDynamic(speaker); // Play
+      setDynamicCurrentTime(0);
+    }
+  };
+
+  const onDynamicLoad = (data) => {
+    setDynamicDuration(data.duration);
+  };
+
+  const onDynamicProgress = (data) => {
+    setDynamicCurrentTime(data.currentTime);
+  };
+
+  const onDynamicEnd = () => {
+    setPlayingDynamic(null);
+    setDynamicCurrentTime(0);
+  };
+
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Reset dynamic mode
+  const resetDynamic = async () => {
+    setPlayingDynamic(null);
+    setUrlA('');
+    setUrlB('');
+    setDownloadedA(false);
+    setDownloadedB(false);
+    setSegmentsA([]);
+    setSegmentsB([]);
+    setConversation([]);
+    setTranscriptionResults({});
+
+    // Delete downloaded files
+    const pathA = `${RNFS.DocumentDirectoryPath}/dynamic_a.wav`;
+    const pathB = `${RNFS.DocumentDirectoryPath}/dynamic_b.wav`;
+    if (await RNFS.exists(pathA)) await RNFS.unlink(pathA);
+    if (await RNFS.exists(pathB)) await RNFS.unlink(pathB);
   };
 
   const checkAndLoadModel = async () => {
@@ -477,7 +639,188 @@ const RecordingsScreen = () => {
         )}
       </View>
 
-      {/* Audio Files Section */}
+      {/* Mode Toggle */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>🔄 Chế độ</Text>
+        <View style={styles.modeToggle}>
+          <TouchableOpacity
+            style={[styles.modeBtn, !dynamicMode && styles.modeBtnActive]}
+            onPress={() => setDynamicMode(false)}
+          >
+            <Text style={[styles.modeBtnText, !dynamicMode && styles.modeBtnTextActive]}>
+              📁 Preset Audio
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.modeBtn, dynamicMode && styles.modeBtnActive]}
+            onPress={() => { setDynamicMode(true); resetDynamic(); }}
+          >
+            <Text style={[styles.modeBtnText, dynamicMode && styles.modeBtnTextActive]}>
+              🔗 Dynamic URL
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Dynamic URL Section */}
+      {dynamicMode && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>🔗 Nhập URL Audio</Text>
+
+          {/* Hidden dynamic audio player */}
+          {playingDynamic && (
+            <Video
+              ref={dynamicPlayerRef}
+              source={{ uri: `file://${RNFS.DocumentDirectoryPath}/dynamic_${playingDynamic.toLowerCase()}.wav` }}
+              paused={false}
+              volume={1.0}
+              onLoad={onDynamicLoad}
+              onProgress={onDynamicProgress}
+              onEnd={onDynamicEnd}
+              audioOnly={true}
+              playInBackground={true}
+              progressUpdateInterval={250}
+              style={styles.hiddenPlayer}
+            />
+          )}
+
+          {/* Person A URL */}
+          <View style={styles.urlInputGroup}>
+            <View style={styles.urlHeader}>
+              <Text style={styles.urlLabel}>👨 Person A URL:</Text>
+              {downloadedA && (
+                <TouchableOpacity
+                  style={[styles.playBtnSmall, { backgroundColor: '#1976D2' }]}
+                  onPress={() => playDynamicAudio('A')}
+                >
+                  <Text style={styles.playBtnSmallText}>
+                    {playingDynamic === 'A' ? '⏸️' : '▶️'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+            <TextInput
+              style={styles.urlInput}
+              placeholder="https://example.com/person_a.wav"
+              placeholderTextColor="#999"
+              value={urlA}
+              onChangeText={setUrlA}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {/* Progress bar for A */}
+            {playingDynamic === 'A' && (
+              <View style={styles.dynamicProgress}>
+                <Text style={styles.dynamicTime}>{formatTime(dynamicCurrentTime)}</Text>
+                <View style={styles.dynamicProgressBar}>
+                  <View style={[styles.dynamicProgressFill, { width: `${dynamicDuration > 0 ? (dynamicCurrentTime / dynamicDuration) * 100 : 0}%` }]} />
+                </View>
+                <Text style={styles.dynamicTime}>{formatTime(dynamicDuration)}</Text>
+              </View>
+            )}
+            <View style={styles.urlActions}>
+              <TouchableOpacity
+                style={[styles.urlBtn, isDownloadingA && styles.urlBtnDisabled]}
+                onPress={() => downloadAudioFromUrl(urlA, 'A')}
+                disabled={isDownloadingA || !urlA}
+              >
+                {isDownloadingA ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.urlBtnText}>
+                    {downloadedA ? '✅ Downloaded' : '⬇️ Download'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+              {downloadedA && (
+                <TouchableOpacity
+                  style={[styles.urlBtn, styles.transcribeBtnDynamic, isTranscribing && styles.urlBtnDisabled]}
+                  onPress={() => transcribeDynamicAudio('A')}
+                  disabled={isTranscribing || !modelReady}
+                >
+                  {isTranscribing ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <Text style={styles.urlBtnText}>🎙️ Transcribe</Text>
+                  )}
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          {/* Person B URL */}
+          <View style={styles.urlInputGroup}>
+            <View style={styles.urlHeader}>
+              <Text style={styles.urlLabel}>👩 Person B URL:</Text>
+              {downloadedB && (
+                <TouchableOpacity
+                  style={[styles.playBtnSmall, { backgroundColor: '#C2185B' }]}
+                  onPress={() => playDynamicAudio('B')}
+                >
+                  <Text style={styles.playBtnSmallText}>
+                    {playingDynamic === 'B' ? '⏸️' : '▶️'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+            <TextInput
+              style={styles.urlInput}
+              placeholder="https://example.com/person_b.wav"
+              placeholderTextColor="#999"
+              value={urlB}
+              onChangeText={setUrlB}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {/* Progress bar for B */}
+            {playingDynamic === 'B' && (
+              <View style={styles.dynamicProgress}>
+                <Text style={styles.dynamicTime}>{formatTime(dynamicCurrentTime)}</Text>
+                <View style={styles.dynamicProgressBar}>
+                  <View style={[styles.dynamicProgressFill, { width: `${dynamicDuration > 0 ? (dynamicCurrentTime / dynamicDuration) * 100 : 0}%` }]} />
+                </View>
+                <Text style={styles.dynamicTime}>{formatTime(dynamicDuration)}</Text>
+              </View>
+            )}
+            <View style={styles.urlActions}>
+              <TouchableOpacity
+                style={[styles.urlBtn, isDownloadingB && styles.urlBtnDisabled]}
+                onPress={() => downloadAudioFromUrl(urlB, 'B')}
+                disabled={isDownloadingB || !urlB}
+              >
+                {isDownloadingB ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.urlBtnText}>
+                    {downloadedB ? '✅ Downloaded' : '⬇️ Download'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+              {downloadedB && (
+                <TouchableOpacity
+                  style={[styles.urlBtn, styles.transcribeBtnDynamic, isTranscribing && styles.urlBtnDisabled]}
+                  onPress={() => transcribeDynamicAudio('B')}
+                  disabled={isTranscribing || !modelReady}
+                >
+                  {isTranscribing ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <Text style={styles.urlBtnText}>🎙️ Transcribe</Text>
+                  )}
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          {/* Reset Button */}
+          <TouchableOpacity style={styles.resetBtn} onPress={resetDynamic}>
+            <Text style={styles.resetBtnText}>🔄 Reset All</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Audio Files Section - only show in preset mode */}
+      {!dynamicMode && (
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>🎧 Audio Files (26s mỗi file)</Text>
 
@@ -523,6 +866,7 @@ const RecordingsScreen = () => {
           modelReady={modelReady}
         />
       </View>
+      )}
 
       {/* Conversation Display - from Transcription */}
       {conversation.length > 0 && (
@@ -861,6 +1205,132 @@ const styles = StyleSheet.create({
     fontSize: FontSize.sm,
     color: Colors.text,
     lineHeight: 20,
+  },
+  // Mode toggle styles
+  modeToggle: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  modeBtn: {
+    flex: 1,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    alignItems: 'center',
+  },
+  modeBtnActive: {
+    backgroundColor: '#6200EE',
+    borderColor: '#6200EE',
+  },
+  modeBtnText: {
+    fontSize: FontSize.sm,
+    color: Colors.text,
+  },
+  modeBtnTextActive: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+  // URL input styles
+  urlInputGroup: {
+    marginBottom: Spacing.md,
+  },
+  urlLabel: {
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+    color: Colors.text,
+    marginBottom: Spacing.xs,
+  },
+  urlInput: {
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: BorderRadius.sm,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.sm,
+    fontSize: FontSize.sm,
+    color: Colors.text,
+    backgroundColor: Colors.background,
+  },
+  urlActions: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    marginTop: Spacing.sm,
+  },
+  urlBtn: {
+    backgroundColor: '#1976D2',
+    paddingVertical: Spacing.xs,
+    paddingHorizontal: Spacing.md,
+    borderRadius: BorderRadius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 100,
+  },
+  urlBtnDisabled: {
+    backgroundColor: '#9E9E9E',
+  },
+  urlBtnText: {
+    color: '#fff',
+    fontSize: FontSize.sm,
+    fontWeight: '500',
+  },
+  resetBtn: {
+    backgroundColor: '#F44336',
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    borderRadius: BorderRadius.sm,
+    alignItems: 'center',
+    marginTop: Spacing.sm,
+  },
+  resetBtnText: {
+    color: '#fff',
+    fontSize: FontSize.sm,
+    fontWeight: '600',
+  },
+  // Dynamic audio playback styles
+  urlHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: Spacing.xs,
+  },
+  playBtnSmall: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playBtnSmallText: {
+    fontSize: 16,
+  },
+  dynamicProgress: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: Spacing.sm,
+    paddingTop: Spacing.xs,
+  },
+  dynamicProgressBar: {
+    flex: 1,
+    height: 4,
+    backgroundColor: Colors.border,
+    borderRadius: 2,
+    marginHorizontal: Spacing.sm,
+    overflow: 'hidden',
+  },
+  dynamicProgressFill: {
+    height: '100%',
+    backgroundColor: '#6200EE',
+    borderRadius: 2,
+  },
+  dynamicTime: {
+    fontSize: FontSize.xs,
+    color: Colors.textSecondary,
+    width: 36,
+    textAlign: 'center',
+  },
+  transcribeBtnDynamic: {
+    backgroundColor: '#6200EE',
   },
 });
 
