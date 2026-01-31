@@ -34,6 +34,7 @@ import {
   ContactsScreen,
   CallHistoryScreen,
   ProfileScreen,
+  RecordingsScreen,
 } from './src/screens';
 
 // Tabs
@@ -41,6 +42,7 @@ const TABS = {
   HOME: 'home',
   CONTACTS: 'contacts',
   HISTORY: 'history',
+  RECORDINGS: 'recordings',
   PROFILE: 'profile',
 };
 
@@ -578,6 +580,9 @@ export default function App() {
             onCallUser={startCall}
           />
         )}
+        {activeTab === TABS.RECORDINGS && (
+          <RecordingsScreen />
+        )}
         {activeTab === TABS.PROFILE && (
           <ProfileScreen
             user={user}
@@ -619,6 +624,17 @@ export default function App() {
           <Text style={[styles.tabIcon, activeTab === TABS.HISTORY && styles.tabIconActive]}>🕐</Text>
           <Text style={[styles.tabLabel, activeTab === TABS.HISTORY && styles.tabLabelActive]}>
             Recent
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.tab}
+          onPress={() => setActiveTab(TABS.RECORDINGS)}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.tabIcon, activeTab === TABS.RECORDINGS && styles.tabIconActive]}>🎵</Text>
+          <Text style={[styles.tabLabel, activeTab === TABS.RECORDINGS && styles.tabLabelActive]}>
+            Mixer
           </Text>
         </TouchableOpacity>
 

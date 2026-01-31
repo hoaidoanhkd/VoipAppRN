@@ -15,12 +15,15 @@
     "react": "19.2.0",
     "react-native": "0.83.1",
     "react-native-callkeep": "^4.3.16",
+    "react-native-fs": "^2.20.0",
     "react-native-incall-manager": "^4.2.1",
     "react-native-permissions": "^5.4.4",
     "react-native-safe-area-context": "^5.5.2",
+    "react-native-video": "^6.19.0",
     "react-native-webrtc": "^124.0.7",
     "socket.io-client": "^4.8.3",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "whisper.rn": "^0.5.5"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

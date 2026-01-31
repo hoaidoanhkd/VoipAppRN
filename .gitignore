@@ -83,3 +83,4 @@ ios/build/
 
 # Logs
 *.log
+src/assets/models/*.bin
