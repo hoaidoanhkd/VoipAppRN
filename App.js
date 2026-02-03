@@ -35,6 +35,7 @@ import {
   CallHistoryScreen,
   ProfileScreen,
   RecordingsScreen,
+  CallDetailScreen,
 } from './src/screens';
 
 // Tabs
@@ -61,6 +62,8 @@ export default function App() {
 
   // Navigation state
   const [activeTab, setActiveTab] = useState(TABS.HOME);
+  const [showCallDetail, setShowCallDetail] = useState(false);
+  const [selectedCallData, setSelectedCallData] = useState(null);
 
   // Connection state
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
@@ -115,6 +118,15 @@ export default function App() {
         setUser(savedUser);
         // Connect to socket
         await connectToServer(savedUser);
+      } else {
+        // Auto login with default guest user (skip login screen)
+        const guestUser = {
+          id: 'guest_' + Date.now(),
+          username: 'guest_' + Math.random().toString(36).substring(2, 8),
+          display_name: 'Guest User',
+        };
+        setUser(guestUser);
+        await connectToServer(guestUser);
       }
     } catch (error) {
       console.error('Init error:', error);
@@ -414,6 +426,17 @@ export default function App() {
     setUser(updatedUser);
   };
 
+  // === Navigation Handlers ===
+  const navigateToCallDetail = (callData = null) => {
+    setSelectedCallData(callData);
+    setShowCallDetail(true);
+  };
+
+  const navigateBackFromCallDetail = () => {
+    setShowCallDetail(false);
+    setSelectedCallData(null);
+  };
+
   // === RENDER ===
 
   // Loading screen
@@ -554,6 +577,19 @@ export default function App() {
     );
   }
 
+  // Call Detail Screen
+  if (showCallDetail) {
+    return (
+      <View style={styles.container}>
+        <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" translucent={false} />
+        <CallDetailScreen
+          callData={selectedCallData}
+          onBack={navigateBackFromCallDetail}
+        />
+      </View>
+    );
+  }
+
   // Main app with tabs
   return (
     <SafeAreaView style={styles.container}>
@@ -564,7 +600,7 @@ export default function App() {
         {activeTab === TABS.HOME && (
           <HomeScreen
             user={user}
-            onStartCall={startCall}
+            onNavigateToCallDetail={navigateToCallDetail}
             connectionStatus={connectionStatus}
           />
         )}
@@ -599,9 +635,9 @@ export default function App() {
           onPress={() => setActiveTab(TABS.HOME)}
           activeOpacity={0.7}
         >
-          <Text style={[styles.tabIcon, activeTab === TABS.HOME && styles.tabIconActive]}>📞</Text>
+          <Text style={[styles.tabIcon, activeTab === TABS.HOME && styles.tabIconActive]}>🏠</Text>
           <Text style={[styles.tabLabel, activeTab === TABS.HOME && styles.tabLabelActive]}>
-            Calls
+            Home
           </Text>
         </TouchableOpacity>
 

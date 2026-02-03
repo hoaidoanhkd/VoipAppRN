@@ -1,23 +1,13 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
-  TextInput,
   TouchableOpacity,
   StyleSheet,
 } from 'react-native';
 import { Colors, Spacing, FontSize, BorderRadius } from '../theme/colors';
 
-const HomeScreen = ({ user, onStartCall, connectionStatus }) => {
-  const [targetUserId, setTargetUserId] = useState('');
-
-  const handleCall = (isVideo = false) => {
-    if (!targetUserId.trim()) return;
-    if (onStartCall) {
-      onStartCall(targetUserId.trim(), isVideo);
-    }
-  };
-
+const HomeScreen = ({ user, onNavigateToCallDetail, connectionStatus }) => {
   const getStatusInfo = () => {
     switch (connectionStatus) {
       case 'connected':
@@ -37,7 +27,7 @@ const HomeScreen = ({ user, onStartCall, connectionStatus }) => {
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Calls</Text>
+        <Text style={styles.headerTitle}>Home</Text>
         <View style={styles.statusBadge}>
           <View style={[styles.statusDot, { backgroundColor: statusInfo.color }]} />
           <Text style={styles.statusText}>{statusInfo.text}</Text>
@@ -57,59 +47,43 @@ const HomeScreen = ({ user, onStartCall, connectionStatus }) => {
         </View>
       </View>
 
-      {/* Quick Call Section */}
-      <View style={styles.callSection}>
-        <Text style={styles.sectionTitle}>Quick Call</Text>
-        <Text style={styles.sectionSubtitle}>Enter user ID to call directly</Text>
+      {/* Main Action Section */}
+      <View style={styles.actionSection}>
+        <Text style={styles.sectionTitle}>通話履歴</Text>
+        <Text style={styles.sectionSubtitle}>Call History Details</Text>
 
-        <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.input}
-            placeholder="Enter recipient ID..."
-            placeholderTextColor={Colors.textLight}
-            value={targetUserId}
-            onChangeText={setTargetUserId}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-        </View>
-
-        <View style={styles.callButtons}>
-          <TouchableOpacity
-            style={[styles.callButton, styles.voiceButton]}
-            onPress={() => handleCall(false)}
-            disabled={!targetUserId.trim() || connectionStatus !== 'connected'}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.callButtonIcon}>📞</Text>
-            <Text style={styles.callButtonText}>Voice Call</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.callButton, styles.videoButton]}
-            onPress={() => handleCall(true)}
-            disabled={!targetUserId.trim() || connectionStatus !== 'connected'}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.callButtonIcon}>📹</Text>
-            <Text style={styles.callButtonText}>Video Call</Text>
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity
+          style={styles.actionButton}
+          onPress={onNavigateToCallDetail}
+          activeOpacity={0.8}
+        >
+          <View style={styles.actionIconContainer}>
+            <Text style={styles.actionIcon}>📋</Text>
+          </View>
+          <View style={styles.actionContent}>
+            <Text style={styles.actionTitle}>通話履歴詳細</Text>
+            <Text style={styles.actionDesc}>View call history detail</Text>
+          </View>
+          <Text style={styles.actionArrow}>›</Text>
+        </TouchableOpacity>
       </View>
 
-      {/* Tips Section */}
-      <View style={styles.tipsSection}>
-        <View style={styles.tipItem}>
-          <Text style={styles.tipIcon}>💡</Text>
-          <Text style={styles.tipText}>
-            Go to Contacts tab to see online users
-          </Text>
+      {/* Quick Stats */}
+      <View style={styles.statsSection}>
+        <View style={styles.statCard}>
+          <Text style={styles.statIcon}>📞</Text>
+          <Text style={styles.statValue}>12</Text>
+          <Text style={styles.statLabel}>Total Calls</Text>
         </View>
-        <View style={styles.tipItem}>
-          <Text style={styles.tipIcon}>📋</Text>
-          <Text style={styles.tipText}>
-            Check Recent tab for call history
-          </Text>
+        <View style={styles.statCard}>
+          <Text style={styles.statIcon}>⏱️</Text>
+          <Text style={styles.statValue}>45m</Text>
+          <Text style={styles.statLabel}>Talk Time</Text>
+        </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statIcon}>📥</Text>
+          <Text style={styles.statValue}>8</Text>
+          <Text style={styles.statLabel}>Incoming</Text>
         </View>
       </View>
     </View>
@@ -190,7 +164,7 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     marginTop: 2,
   },
-  callSection: {
+  actionSection: {
     padding: Spacing.lg,
   },
   sectionTitle: {
@@ -204,65 +178,67 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     marginBottom: Spacing.lg,
   },
-  inputContainer: {
-    marginBottom: Spacing.lg,
-  },
-  input: {
-    backgroundColor: Colors.inputBackground,
-    borderRadius: BorderRadius.lg,
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.lg,
-    fontSize: FontSize.md,
-    color: Colors.textPrimary,
-  },
-  callButtons: {
-    flexDirection: 'row',
-    gap: Spacing.md,
-  },
-  callButton: {
-    flex: 1,
+  actionButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: Spacing.lg,
-    borderRadius: BorderRadius.lg,
-    gap: Spacing.sm,
-  },
-  voiceButton: {
-    backgroundColor: Colors.callGreen,
-  },
-  videoButton: {
-    backgroundColor: Colors.primary,
-  },
-  callButtonIcon: {
-    fontSize: 20,
-  },
-  callButtonText: {
-    color: Colors.textWhite,
-    fontSize: FontSize.md,
-    fontWeight: '600',
-  },
-  tipsSection: {
-    marginHorizontal: Spacing.lg,
-    marginTop: Spacing.xl,
-    padding: Spacing.lg,
     backgroundColor: Colors.backgroundSecondary,
+    padding: Spacing.lg,
     borderRadius: BorderRadius.xl,
   },
-  tipItem: {
-    flexDirection: 'row',
+  actionIconContainer: {
+    width: 50,
+    height: 50,
+    borderRadius: 12,
+    backgroundColor: '#e8f5f3',
+    justifyContent: 'center',
     alignItems: 'center',
-    paddingVertical: Spacing.sm,
   },
-  tipIcon: {
-    fontSize: 16,
-    marginRight: Spacing.md,
+  actionIcon: {
+    fontSize: 24,
   },
-  tipText: {
+  actionContent: {
     flex: 1,
+    marginLeft: Spacing.md,
+  },
+  actionTitle: {
+    fontSize: FontSize.lg,
+    fontWeight: '600',
+    color: Colors.textPrimary,
+  },
+  actionDesc: {
     fontSize: FontSize.sm,
     color: Colors.textSecondary,
-    lineHeight: 20,
+    marginTop: 2,
+  },
+  actionArrow: {
+    fontSize: 28,
+    color: Colors.textSecondary,
+  },
+  statsSection: {
+    flexDirection: 'row',
+    paddingHorizontal: Spacing.lg,
+    gap: Spacing.md,
+  },
+  statCard: {
+    flex: 1,
+    backgroundColor: Colors.backgroundSecondary,
+    padding: Spacing.lg,
+    borderRadius: BorderRadius.xl,
+    alignItems: 'center',
+  },
+  statIcon: {
+    fontSize: 24,
+    marginBottom: Spacing.sm,
+  },
+  statValue: {
+    fontSize: FontSize.xl,
+    fontWeight: '700',
+    color: Colors.textPrimary,
+  },
+  statLabel: {
+    fontSize: FontSize.xs,
+    color: Colors.textSecondary,
+    marginTop: 4,
   },
 });
 
