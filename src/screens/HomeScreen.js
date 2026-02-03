@@ -54,7 +54,7 @@ const HomeScreen = ({ user, onNavigateToCallDetail, connectionStatus }) => {
 
         <TouchableOpacity
           style={styles.actionButton}
-          onPress={onNavigateToCallDetail}
+          onPress={() => onNavigateToCallDetail()}
           activeOpacity={0.8}
         >
           <View style={styles.actionIconContainer}>

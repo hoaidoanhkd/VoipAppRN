@@ -7,6 +7,9 @@ import {
   ScrollView,
   Platform,
   StatusBar,
+  ActivityIndicator,
+  Alert,
+  Image,
 } from 'react-native';
 import Svg, {
   Path,
@@ -16,6 +19,38 @@ import Svg, {
   Circle,
   Polygon,
 } from 'react-native-svg';
+import Video from 'react-native-video';
+import RNFS from 'react-native-fs';
+import { initWhisper } from 'whisper.rn';
+
+// Whisper Model URL
+const MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin';
+const MODEL_FILENAME = 'ggml-small.bin';
+
+
+// Audio files
+const AUDIO_FILES = {
+  personA: {
+    name: 'オペレーター',
+    source: require('../assets/audio/person_a_final.wav'),
+    color: '#1976D2',
+  },
+  personB: {
+    name: 'お客様',
+    source: require('../assets/audio/person_b_final.wav'),
+    color: '#C2185B',
+  },
+  merged: {
+    name: '通話録音',
+    source: require('../assets/audio/merged_conversation.wav'),
+    color: '#1a7a6d',
+  },
+  stereo: {
+    name: '通話録音 (Stereo)',
+    source: require('../assets/audio/stereo_conversation.wav'),
+    color: '#1a7a6d',
+  },
+};
 
 // SVG Icons
 const ChevronLeft = () => (
@@ -120,54 +155,29 @@ const Forward10 = () => (
   </Svg>
 );
 
+const STATUSBAR_HEIGHT = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
+
 const CallDetailScreen = ({ callData = {}, onBack }) => {
+  // Audio player states
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
-  const totalDuration = callData?.duration || 46;
-  const intervalRef = useRef(null);
+  const [duration, setDuration] = useState(0);
+  const [activeTrack, setActiveTrack] = useState('merged');
+  const playerRef = useRef(null);
 
-  useEffect(() => {
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, []);
+  // Whisper states
+  const [whisperContext, setWhisperContext] = useState(null);
+  const [isModelLoading, setIsModelLoading] = useState(false);
+  const [modelProgress, setModelProgress] = useState(0);
+  const [modelReady, setModelReady] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcribeStatus, setTranscribeStatus] = useState('');
 
-  const togglePlay = () => {
-    if (isPlaying) {
-      clearInterval(intervalRef.current);
-      setIsPlaying(false);
-    } else {
-      setIsPlaying(true);
-      intervalRef.current = setInterval(() => {
-        setCurrentTime((prev) => {
-          if (prev >= totalDuration) {
-            clearInterval(intervalRef.current);
-            setIsPlaying(false);
-            setProgress(0);
-            return 0;
-          }
-          const newTime = prev + 1;
-          setProgress((newTime / totalDuration) * 100);
-          return newTime;
-        });
-      }, 1000);
-    }
-  };
-
-  const skip = (seconds) => {
-    setCurrentTime((prev) => {
-      const newTime = Math.max(0, Math.min(totalDuration, prev + seconds));
-      setProgress((newTime / totalDuration) * 100);
-      return newTime;
-    });
-  };
-
-  const formatTime = (s) => {
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
-  };
+  // Transcription states
+  const [segmentsA, setSegmentsA] = useState([]);
+  const [segmentsB, setSegmentsB] = useState([]);
+  const [conversation, setConversation] = useState([]);
 
   // Default data
   const data = {
@@ -179,7 +189,7 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     direction: '発信',
     agent: 'InfiniGuest002',
     agentPhone: '05036116648',
-    ...callData,
+    ...(callData && typeof callData === 'object' && !callData.nativeEvent ? callData : {}),
   };
 
   const callInfo = [
@@ -191,20 +201,325 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     { icon: <PhoneIcon />, label: '電話番号', value: data.agentPhone },
   ];
 
+  // Initialize Whisper
+  useEffect(() => {
+    checkAndLoadModel();
+    return () => {
+      if (whisperContext) {
+        whisperContext.release();
+      }
+    };
+  }, []);
+
+  // Note: Conversation is now built in transcribeConversation() using merged audio
+  // This useEffect is kept for backward compatibility but not used with new method
+
+  const getModelPath = () => `${RNFS.DocumentDirectoryPath}/${MODEL_FILENAME}`;
+
+  const checkAndLoadModel = async () => {
+    const modelPath = getModelPath();
+    const exists = await RNFS.exists(modelPath);
+    if (exists) {
+      await initializeWhisper(modelPath);
+    }
+  };
+
+  const downloadModel = async () => {
+    const modelPath = getModelPath();
+    const exists = await RNFS.exists(modelPath);
+
+    if (exists) {
+      await initializeWhisper(modelPath);
+      return;
+    }
+
+    setIsModelLoading(true);
+    setModelProgress(0);
+
+    try {
+      const downloadResult = RNFS.downloadFile({
+        fromUrl: MODEL_URL,
+        toFile: modelPath,
+        progress: (res) => {
+          const prog = (res.bytesWritten / res.contentLength) * 100;
+          setModelProgress(Math.round(prog));
+        },
+        progressDivider: 1,
+      });
+
+      const result = await downloadResult.promise;
+      if (result.statusCode === 200) {
+        await initializeWhisper(modelPath);
+      } else {
+        Alert.alert('エラー', 'モデルのダウンロードに失敗しました');
+      }
+    } catch (error) {
+      Alert.alert('エラー', `ダウンロード失敗: ${error.message}`);
+    } finally {
+      setIsModelLoading(false);
+    }
+  };
+
+  const initializeWhisper = async (modelPath) => {
+    try {
+      setIsModelLoading(true);
+      const context = await initWhisper({ filePath: modelPath });
+      setWhisperContext(context);
+      setModelReady(true);
+    } catch (error) {
+      Alert.alert('エラー', `Whisper初期化失敗: ${error.message}`);
+    } finally {
+      setIsModelLoading(false);
+    }
+  };
+
+  // Get audio file path from assets
+  const getAudioFilePath = async (trackKey) => {
+    const audioSource = AUDIO_FILES[trackKey].source;
+    const destPath = `${RNFS.DocumentDirectoryPath}/${trackKey}.wav`;
+
+    const exists = await RNFS.exists(destPath);
+    if (exists) {
+      return destPath;
+    }
+
+    try {
+      const resolved = Image.resolveAssetSource(audioSource);
+      if (!resolved || !resolved.uri) {
+        return null;
+      }
+
+      const uri = resolved.uri;
+
+      if (uri.startsWith('http')) {
+        const downloadResult = await RNFS.downloadFile({
+          fromUrl: uri,
+          toFile: destPath,
+        }).promise;
+
+        if (downloadResult.statusCode === 200) {
+          return destPath;
+        }
+      } else if (uri.startsWith('file://')) {
+        const sourcePath = uri.replace('file://', '');
+        await RNFS.copyFile(sourcePath, destPath);
+        return destPath;
+      }
+
+      return null;
+    } catch (error) {
+      console.error('Error getting audio path:', error);
+      return null;
+    }
+  };
+
+  // Transcribe single audio file
+  const transcribeSingleAudio = async (trackKey) => {
+    const audioPath = await getAudioFilePath(trackKey);
+    if (!audioPath) {
+      throw new Error(`音声ファイルのパスを取得できません: ${trackKey}`);
+    }
+
+    const { promise } = whisperContext.transcribe(audioPath, {
+      language: 'ja',
+      maxLen: 0,
+      tokenTimestamps: true,
+      wordTimestamps: true,
+    });
+
+    const result = await promise;
+    const segments = result?.segments || [];
+
+    // t0/t1 are in centiseconds (1/100 second)
+    const parsedSegments = segments.map(s => ({
+      text: s.text?.trim() || '',
+      startTime: (s.t0 || 0) / 100,
+      endTime: (s.t1 || 0) / 100,
+    })).filter(item => item.text && item.text !== '(音楽)' && item.text !== '');
+
+    return parsedSegments;
+  };
+
+  // Transcribe without silence detection (raw timestamps from Whisper)
+  const transcribeSingleAudioRaw = async (trackKey) => {
+    const audioPath = await getAudioFilePath(trackKey);
+    if (!audioPath) {
+      throw new Error(`音声ファイルのパスを取得できません: ${trackKey}`);
+    }
+
+    const { promise } = whisperContext.transcribe(audioPath, {
+      language: 'ja',
+      maxLen: 0,
+      tokenTimestamps: true,
+    });
+
+    const result = await promise;
+    const segments = result?.segments || [];
+
+    return segments.map(s => ({
+      text: s.text?.trim() || '',
+      startTime: (s.t0 || 0) / 100,
+      endTime: (s.t1 || 0) / 100,
+    })).filter(item => item.text && item.text !== '(音楽)' && item.text !== '');
+  };
+
+  // Normalize text for comparison
+  const normalizeText = (text) => {
+    return (text || '')
+      .toLowerCase()
+      .replace(/[、。？！\s　]/g, '')
+      .replace(/[ぁ-ん]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60)); // hiragana to katakana
+  };
+
+  // Find best match score between text and a set of texts
+  const findBestMatch = (text, textSet) => {
+    if (!text || textSet.size === 0) return 0;
+
+    let bestScore = 0;
+    for (const candidate of textSet) {
+      // Calculate similarity based on common characters
+      const textChars = new Set(text.split(''));
+      const candidateChars = new Set(candidate.split(''));
+      const intersection = [...textChars].filter(c => candidateChars.has(c)).length;
+      const union = new Set([...textChars, ...candidateChars]).size;
+      const score = union > 0 ? intersection / union : 0;
+
+      // Also check for substring match
+      if (text.includes(candidate) || candidate.includes(text)) {
+        bestScore = Math.max(bestScore, 0.9);
+      }
+
+      bestScore = Math.max(bestScore, score);
+    }
+    return bestScore;
+  };
+
+  // Quick Fix: Transcribe stereo file for correct timestamps, then identify speakers
+  const transcribeConversation = async () => {
+    if (!whisperContext) {
+      Alert.alert('エラー', 'Whisperモデルをダウンロードしてください');
+      return;
+    }
+
+    setIsTranscribing(true);
+    setConversation([]);
+
+    try {
+      // Step 1: Transcribe individual files to get speaker-specific text
+      setTranscribeStatus('🎙️ オペレーター音声を解析中...');
+      const segsA = await transcribeSingleAudioRaw('personA');
+      const textsA = new Set(segsA.map(s => normalizeText(s.text)));
+      console.log('Operator texts:', [...textsA]);
+
+      setTranscribeStatus('🎙️ お客様音声を解析中...');
+      const segsB = await transcribeSingleAudioRaw('personB');
+      const textsB = new Set(segsB.map(s => normalizeText(s.text)));
+      console.log('Customer texts:', [...textsB]);
+
+      // Step 2: Transcribe stereo file for correct timestamps
+      setTranscribeStatus('🎙️ 統合音声を処理中...');
+      const stereoSegs = await transcribeSingleAudioRaw('stereo');
+      console.log('Stereo segments:', stereoSegs.length);
+
+      // Step 3: Match each stereo segment to speaker by comparing text
+      setTranscribeStatus('📝 話者を識別中...');
+      const allSegments = stereoSegs.map(seg => {
+        const normalizedText = normalizeText(seg.text);
+
+        // Check which speaker's text set contains this segment
+        const matchA = findBestMatch(normalizedText, textsA);
+        const matchB = findBestMatch(normalizedText, textsB);
+
+        let speaker = 'A'; // Default to Operator
+        if (matchB > matchA) {
+          speaker = 'B';
+        }
+
+        return {
+          ...seg,
+          speaker,
+          startTime: seg.startTime,
+          endTime: seg.endTime,
+        };
+      });
+
+      console.log('Final order:', allSegments.map(s => `${s.speaker}(${s.startTime.toFixed(1)}s): ${s.text.substring(0, 10)}`));
+
+      setConversation(allSegments);
+      setTranscribeStatus('');
+    } catch (error) {
+      console.error('Transcription error:', error);
+      Alert.alert('エラー', `文字起こし失敗: ${error.message}`);
+      setTranscribeStatus('');
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  // Audio player handlers
+  const togglePlay = () => {
+    setIsPlaying(!isPlaying);
+  };
+
+  const onLoad = (data) => setDuration(data.duration);
+  const onProgress = (data) => {
+    setCurrentTime(data.currentTime);
+    setProgress(duration > 0 ? (data.currentTime / duration) * 100 : 0);
+  };
+  const onEnd = () => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setProgress(0);
+  };
+
+  const formatTime = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  };
+
+  const skip = (seconds) => {
+    if (playerRef.current) {
+      const newTime = Math.max(0, Math.min(duration, currentTime + seconds));
+      playerRef.current.seek(newTime);
+    }
+  };
+
   return (
     <View style={styles.container}>
+      {/* Hidden audio player */}
+      {activeTrack && AUDIO_FILES[activeTrack] && (
+        <Video
+          ref={playerRef}
+          source={AUDIO_FILES[activeTrack].source}
+          paused={!isPlaying}
+          volume={1.0}
+          onLoad={onLoad}
+          onProgress={onProgress}
+          onEnd={onEnd}
+          onError={(error) => {
+            console.error('Audio error:', error);
+            Alert.alert('音声エラー', JSON.stringify(error));
+          }}
+          audioOnly={true}
+          playInBackground={true}
+          playWhenInactive={true}
+          progressUpdateInterval={250}
+          style={{ width: 0, height: 0 }}
+        />
+      )}
+
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity style={styles.backButton} onPress={onBack} activeOpacity={0.7}>
-          <Text style={styles.backArrow}>{'<'}</Text>
+          <ChevronLeft />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>通話履歴詳細</Text>
         <View style={styles.headerSpacer} />
       </View>
 
-      {/* Scrollable Content */}
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Call Target Section */}
+        {/* Contact Section */}
         <Text style={styles.sectionLabel}>通話先</Text>
         <View style={styles.contactCard}>
           <View style={styles.avatar}>
@@ -219,7 +534,6 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
           </TouchableOpacity>
         </View>
 
-        {/* Divider */}
         <View style={styles.divider} />
 
         {/* Call Info Section */}
@@ -248,7 +562,6 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
             </TouchableOpacity>
           </View>
 
-          {/* Slider */}
           <View style={styles.sliderContainer}>
             <View style={styles.sliderTrack}>
               <View style={[styles.sliderFilled, { width: `${progress}%` }]} />
@@ -258,10 +571,9 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
 
           <View style={styles.timeRow}>
             <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
-            <Text style={styles.timeText}>{formatTime(totalDuration)}</Text>
+            <Text style={styles.timeText}>{formatTime(duration || data.duration)}</Text>
           </View>
 
-          {/* Controls */}
           <View style={styles.controls}>
             <TouchableOpacity style={styles.controlButton} onPress={() => skip(-10)}>
               <Replay10 />
@@ -275,15 +587,73 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
               <Text style={styles.skipText}>10</Text>
             </TouchableOpacity>
           </View>
+
+          {/* Transcribe Button - inside player */}
+          {modelReady && (
+            <TouchableOpacity
+              style={[styles.transcribeMainBtn, isTranscribing && styles.btnDisabled]}
+              onPress={transcribeConversation}
+              disabled={isTranscribing}
+            >
+              {isTranscribing ? (
+                <View style={styles.transcribeLoading}>
+                  <ActivityIndicator color="#fff" size="small" />
+                  <Text style={styles.transcribeBtnText}> {transcribeStatus || '処理中...'}</Text>
+                </View>
+              ) : (
+                <Text style={styles.transcribeBtnText}>🎙️ 会話を文字起こし</Text>
+              )}
+            </TouchableOpacity>
+          )}
+
+          {/* Download Model Button if not ready */}
+          {!modelReady && (
+            <TouchableOpacity
+              style={[styles.downloadModelBtn, isModelLoading && styles.btnDisabled]}
+              onPress={downloadModel}
+              disabled={isModelLoading}
+            >
+              {isModelLoading ? (
+                <View style={styles.transcribeLoading}>
+                  <ActivityIndicator color="#fff" size="small" />
+                  <Text style={styles.transcribeBtnText}> ダウンロード中 {modelProgress}%</Text>
+                </View>
+              ) : (
+                <Text style={styles.transcribeBtnText}>⬇️ Whisperモデルをダウンロード</Text>
+              )}
+            </TouchableOpacity>
+          )}
         </View>
+
+        {/* Conversation Chat */}
+        {conversation.length > 0 && (
+          <View style={styles.chatSection}>
+            <Text style={styles.chatTitle}>💬 会話内容 ({conversation.length}件)</Text>
+
+            {conversation.map((item, index) => (
+              <View
+                key={index}
+                style={item.speaker === 'A' ? styles.chatBubbleA : styles.chatBubbleB}
+              >
+                <View style={styles.chatHeader}>
+                  <Text style={[styles.chatSpeaker, { color: item.speaker === 'A' ? '#1976D2' : '#C2185B' }]}>
+                    {item.speaker === 'A' ? '🎧 オペレーター' : '👤 お客様'}
+                  </Text>
+                  <Text style={styles.chatTime}>
+                    {item.startTime.toFixed(1)}s
+                  </Text>
+                </View>
+                <Text style={styles.chatText}>{item.text}</Text>
+              </View>
+            ))}
+          </View>
+        )}
 
         <View style={{ height: 40 }} />
       </ScrollView>
     </View>
   );
 };
-
-const STATUSBAR_HEIGHT = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
 
 const styles = StyleSheet.create({
   container: {
@@ -304,11 +674,6 @@ const styles = StyleSheet.create({
     height: 44,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  backArrow: {
-    fontSize: 28,
-    fontWeight: '300',
-    color: '#333',
   },
   headerTitle: {
     flex: 1,
@@ -362,7 +727,6 @@ const styles = StyleSheet.create({
   contactNumber: {
     fontSize: 14,
     color: '#888',
-    letterSpacing: 0.3,
   },
   callButton: {
     width: 48,
@@ -416,7 +780,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#F5F5F0',
     borderRadius: 20,
     paddingTop: 20,
-    paddingBottom: 24,
+    paddingBottom: 20,
     paddingHorizontal: 20,
     marginTop: 8,
   },
@@ -507,11 +871,80 @@ const styles = StyleSheet.create({
     backgroundColor: '#F5D94E',
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#F5D94E',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.35,
-    shadowRadius: 12,
-    elevation: 6,
+  },
+  // Transcribe button
+  transcribeMainBtn: {
+    backgroundColor: '#1a7a6d',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  transcribeBtnText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  transcribeLoading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  downloadModelBtn: {
+    backgroundColor: '#6200EE',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  btnDisabled: {
+    backgroundColor: '#9E9E9E',
+  },
+  // Chat section
+  chatSection: {
+    marginTop: 20,
+  },
+  chatTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 12,
+  },
+  chatBubbleA: {
+    backgroundColor: '#E3F2FD',
+    padding: 12,
+    borderRadius: 16,
+    borderTopLeftRadius: 4,
+    marginBottom: 8,
+    marginRight: 50,
+  },
+  chatBubbleB: {
+    backgroundColor: '#FCE4EC',
+    padding: 12,
+    borderRadius: 16,
+    borderTopRightRadius: 4,
+    marginBottom: 8,
+    marginLeft: 50,
+  },
+  chatHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  chatSpeaker: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  chatTime: {
+    fontSize: 11,
+    color: '#888',
+  },
+  chatText: {
+    fontSize: 15,
+    color: '#222',
+    lineHeight: 22,
   },
 });
 
