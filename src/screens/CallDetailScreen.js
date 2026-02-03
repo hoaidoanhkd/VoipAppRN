@@ -459,12 +459,12 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
 
     try {
       // Step 1: Transcribe Operator file
-      setTranscribeStatus('🎙️ オペレーター音声を解析中... (1/2)');
+      setTranscribeStatus('オペレーター音声を解析中... (1/2)');
       const segsA = await transcribeSingleAudioRaw('personA');
       console.log('Operator segments:', segsA.length, segsA.map(s => s.text));
 
       // Step 2: Transcribe Customer file (use trimmed version to avoid hallucination)
-      setTranscribeStatus('🎙️ お客様音声を解析中... (2/2)');
+      setTranscribeStatus('お客様音声を解析中... (2/2)');
       const segsB = await transcribeSingleAudioRaw('personBTrimmed');
       // Add offset to timestamps since silence was trimmed from beginning
       segsB.forEach(seg => {
@@ -474,7 +474,7 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
       console.log('Customer segments:', segsB.length, segsB.map(s => `${s.startTime.toFixed(1)}s: ${s.text}`));
 
       // Step 3: Label speakers and merge by timestamp
-      setTranscribeStatus('📝 会話を構築中...');
+      setTranscribeStatus('会話を構築中...');
 
       const operatorSegs = segsA.map(seg => ({
         ...seg,
