@@ -40,6 +40,12 @@ const AUDIO_FILES = {
     source: require('../assets/audio/person_b_final.wav'),
     color: '#C2185B',
   },
+  // Trimmed version of personB (silence removed) for better transcription
+  personBTrimmed: {
+    name: 'お客様',
+    source: require('../assets/audio/person_b_trimmed.wav'),
+    color: '#C2185B',
+  },
   merged: {
     name: '通話録音',
     source: require('../assets/audio/merged_conversation.wav'),
@@ -51,6 +57,9 @@ const AUDIO_FILES = {
     color: '#1a7a6d',
   },
 };
+
+// Time offset for personB (silence trimmed from beginning)
+const PERSON_B_OFFSET = 7.0; // seconds
 
 // SVG Icons
 const ChevronLeft = () => (
@@ -192,8 +201,11 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     ...(callData && typeof callData === 'object' && !callData.nativeEvent ? callData : {}),
   };
 
+  // Use actual audio duration if available, otherwise use default
+  const displayDuration = duration > 0 ? Math.round(duration) : data.duration;
+
   const callInfo = [
-    { icon: <HourglassIcon />, label: '通話時間', value: `${data.duration}秒` },
+    { icon: <HourglassIcon />, label: '通話時間', value: `${displayDuration}秒` },
     { icon: <BellIcon />, label: '呼出時間', value: `${data.ringTime}秒` },
     { icon: <CalendarIcon />, label: '日付', value: data.date },
     { icon: <ArrowUpDown />, label: '通話方向', value: data.direction },
@@ -276,39 +288,65 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
   // Get audio file path from assets
   const getAudioFilePath = async (trackKey) => {
     const audioSource = AUDIO_FILES[trackKey].source;
-    const destPath = `${RNFS.DocumentDirectoryPath}/${trackKey}.wav`;
+    // Use timestamp to force fresh copy
+    const destPath = `${RNFS.DocumentDirectoryPath}/${trackKey}_v2.wav`;
 
+    // Always delete cached file to ensure fresh copy from assets
     const exists = await RNFS.exists(destPath);
     if (exists) {
-      return destPath;
+      await RNFS.unlink(destPath);
+      console.log(`[Audio] Deleted cached: ${destPath}`);
     }
 
     try {
       const resolved = Image.resolveAssetSource(audioSource);
+      console.log(`[Audio] ${trackKey} resolved:`, JSON.stringify(resolved));
+
       if (!resolved || !resolved.uri) {
+        console.error(`[Audio] Failed to resolve: ${trackKey}`);
         return null;
       }
 
       const uri = resolved.uri;
 
       if (uri.startsWith('http')) {
+        console.log(`[Audio] Downloading from: ${uri}`);
         const downloadResult = await RNFS.downloadFile({
           fromUrl: uri,
           toFile: destPath,
         }).promise;
 
         if (downloadResult.statusCode === 200) {
+          const stat = await RNFS.stat(destPath);
+          console.log(`[Audio] Downloaded ${trackKey}: ${stat.size} bytes`);
           return destPath;
         }
       } else if (uri.startsWith('file://')) {
         const sourcePath = uri.replace('file://', '');
         await RNFS.copyFile(sourcePath, destPath);
+        const stat = await RNFS.stat(destPath);
+        console.log(`[Audio] Copied ${trackKey}: ${stat.size} bytes`);
+        return destPath;
+      } else if (Platform.OS === 'android') {
+        // Android: copy from assets using copyFileAssets
+        const assetMap = {
+          personA: 'person_a_final',
+          personB: 'person_b_final',
+          personBTrimmed: 'person_b_trimmed',
+          merged: 'merged_conversation',
+          stereo: 'stereo_conversation',
+        };
+        const assetPath = `audio/${assetMap[trackKey] || trackKey}.wav`;
+        console.log(`[Audio] Android asset path: ${assetPath}`);
+        await RNFS.copyFileAssets(assetPath, destPath);
+        const stat = await RNFS.stat(destPath);
+        console.log(`[Audio] Copied from assets ${trackKey}: ${stat.size} bytes`);
         return destPath;
       }
 
       return null;
     } catch (error) {
-      console.error('Error getting audio path:', error);
+      console.error(`[Audio] Error for ${trackKey}:`, error);
       return null;
     }
   };
@@ -351,16 +389,31 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
       language: 'ja',
       maxLen: 0,
       tokenTimestamps: true,
+      // Anti-hallucination settings
+      temperature: 0,
+      temperatureInc: 0.2,
+      noSpeechThold: 0.6,
+      entropy_thold: 2.4,
     });
 
     const result = await promise;
     const segments = result?.segments || [];
 
+    // Filter out noise only (music/silence markers)
+    const noise = ['(音楽)', '[音楽]', '♪', '🎵'];
+
     return segments.map(s => ({
       text: s.text?.trim() || '',
       startTime: (s.t0 || 0) / 100,
       endTime: (s.t1 || 0) / 100,
-    })).filter(item => item.text && item.text !== '(音楽)' && item.text !== '');
+    })).filter(item => {
+      if (!item.text) return false;
+      // Filter out music/noise markers
+      for (const n of noise) {
+        if (item.text.includes(n)) return false;
+      }
+      return true;
+    });
   };
 
   // Normalize text for comparison
@@ -405,45 +458,41 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     setConversation([]);
 
     try {
-      // Step 1: Transcribe individual files to get speaker-specific text
-      setTranscribeStatus('🎙️ オペレーター音声を解析中...');
+      // Step 1: Transcribe Operator file
+      setTranscribeStatus('🎙️ オペレーター音声を解析中... (1/2)');
       const segsA = await transcribeSingleAudioRaw('personA');
-      const textsA = new Set(segsA.map(s => normalizeText(s.text)));
-      console.log('Operator texts:', [...textsA]);
+      console.log('Operator segments:', segsA.length, segsA.map(s => s.text));
 
-      setTranscribeStatus('🎙️ お客様音声を解析中...');
-      const segsB = await transcribeSingleAudioRaw('personB');
-      const textsB = new Set(segsB.map(s => normalizeText(s.text)));
-      console.log('Customer texts:', [...textsB]);
-
-      // Step 2: Transcribe stereo file for correct timestamps
-      setTranscribeStatus('🎙️ 統合音声を処理中...');
-      const stereoSegs = await transcribeSingleAudioRaw('stereo');
-      console.log('Stereo segments:', stereoSegs.length);
-
-      // Step 3: Match each stereo segment to speaker by comparing text
-      setTranscribeStatus('📝 話者を識別中...');
-      const allSegments = stereoSegs.map(seg => {
-        const normalizedText = normalizeText(seg.text);
-
-        // Check which speaker's text set contains this segment
-        const matchA = findBestMatch(normalizedText, textsA);
-        const matchB = findBestMatch(normalizedText, textsB);
-
-        let speaker = 'A'; // Default to Operator
-        if (matchB > matchA) {
-          speaker = 'B';
-        }
-
-        return {
-          ...seg,
-          speaker,
-          startTime: seg.startTime,
-          endTime: seg.endTime,
-        };
+      // Step 2: Transcribe Customer file (use trimmed version to avoid hallucination)
+      setTranscribeStatus('🎙️ お客様音声を解析中... (2/2)');
+      const segsB = await transcribeSingleAudioRaw('personBTrimmed');
+      // Add offset to timestamps since silence was trimmed from beginning
+      segsB.forEach(seg => {
+        seg.startTime += PERSON_B_OFFSET;
+        seg.endTime += PERSON_B_OFFSET;
       });
+      console.log('Customer segments:', segsB.length, segsB.map(s => `${s.startTime.toFixed(1)}s: ${s.text}`));
 
-      console.log('Final order:', allSegments.map(s => `${s.speaker}(${s.startTime.toFixed(1)}s): ${s.text.substring(0, 10)}`));
+      // Step 3: Label speakers and merge by timestamp
+      setTranscribeStatus('📝 会話を構築中...');
+
+      const operatorSegs = segsA.map(seg => ({
+        ...seg,
+        speaker: 'A', // Operator
+      }));
+
+      const customerSegs = segsB.map(seg => ({
+        ...seg,
+        speaker: 'B', // Customer
+      }));
+
+      // Merge and sort by startTime
+      const allSegments = [...operatorSegs, ...customerSegs]
+        .sort((a, b) => a.startTime - b.startTime);
+
+      console.log('Final conversation:', allSegments.map(s =>
+        `${s.speaker}(${s.startTime.toFixed(1)}s): ${s.text.substring(0, 15)}`
+      ));
 
       setConversation(allSegments);
       setTranscribeStatus('');
@@ -601,7 +650,7 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
                   <Text style={styles.transcribeBtnText}> {transcribeStatus || '処理中...'}</Text>
                 </View>
               ) : (
-                <Text style={styles.transcribeBtnText}>🎙️ 会話を文字起こし</Text>
+                <Text style={styles.transcribeBtnText}>文字起こし</Text>
               )}
             </TouchableOpacity>
           )}
