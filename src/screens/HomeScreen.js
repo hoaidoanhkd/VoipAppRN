@@ -39,17 +39,34 @@ const HomeScreen = ({ user, onNavigateToCallDetail, connectionStatus }) => {
         <Text style={styles.sectionTitle}>通話履歴</Text>
         <Text style={styles.sectionSubtitle}>Call History Details</Text>
 
+        {/* 2人の通話 (Two speakers - chat style) */}
         <TouchableOpacity
           style={styles.actionButton}
-          onPress={() => onNavigateToCallDetail()}
+          onPress={() => onNavigateToCallDetail({ singleSpeaker: false })}
           activeOpacity={0.8}
         >
           <View style={styles.actionIconContainer}>
-            <Text style={styles.actionIcon}>📋</Text>
+            <Text style={styles.actionIcon}>👥</Text>
           </View>
           <View style={styles.actionContent}>
-            <Text style={styles.actionTitle}>通話履歴詳細</Text>
-            <Text style={styles.actionDesc}>View call history detail</Text>
+            <Text style={styles.actionTitle}>2人の通話</Text>
+            <Text style={styles.actionDesc}>Two speakers (chat style)</Text>
+          </View>
+          <Text style={styles.actionArrow}>›</Text>
+        </TouchableOpacity>
+
+        {/* 1人の場合 (Single speaker - paragraph style) */}
+        <TouchableOpacity
+          style={[styles.actionButton, { marginTop: Spacing.md }]}
+          onPress={() => onNavigateToCallDetail({ singleSpeaker: true })}
+          activeOpacity={0.8}
+        >
+          <View style={[styles.actionIconContainer, { backgroundColor: '#f0e8f5' }]}>
+            <Text style={styles.actionIcon}>👤</Text>
+          </View>
+          <View style={styles.actionContent}>
+            <Text style={styles.actionTitle}>1人の場合</Text>
+            <Text style={styles.actionDesc}>Single speaker (paragraph style)</Text>
           </View>
           <Text style={styles.actionArrow}>›</Text>
         </TouchableOpacity>

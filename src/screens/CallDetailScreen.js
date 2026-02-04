@@ -176,7 +176,7 @@ const Forward10 = () => (
 
 const STATUSBAR_HEIGHT = Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 0;
 
-const CallDetailScreen = ({ callData = {}, onBack }) => {
+const CallDetailScreen = ({ callData = {}, onBack, singleSpeaker = false }) => {
   // Audio player states
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -537,23 +537,25 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
         await RNFS.unlink(chunkA).catch(() => {});
       }
 
-      // Cut and transcribe first 8s of Customer (15s - 7s offset)
-      const customerEndTime = INITIAL_SECONDS - PERSON_B_OFFSET;
-      if (customerEndTime > 0) {
-        const chunkB = await cutWavChunk(personBPath, 0, customerEndTime);
-        if (chunkB) {
-          const { promise } = whisperContextRef.current.transcribe(chunkB, {
-            language: 'ja', maxLen: 0, tokenTimestamps: true,
-            temperature: 0, temperatureInc: 0.2, noSpeechThold: 0.6,
-          });
-          const result = await promise;
-          segsB = (result?.segments || []).map(s => ({
-            text: s.text?.trim() || '',
-            startTime: PERSON_B_OFFSET + (s.t0 || 0) / 100,
-            endTime: PERSON_B_OFFSET + (s.t1 || 0) / 100,
-            speaker: 'B',
-          }));
-          await RNFS.unlink(chunkB).catch(() => {});
+      // Cut and transcribe first 8s of Customer (15s - 7s offset) - only for 2-speaker mode
+      if (!singleSpeaker) {
+        const customerEndTime = INITIAL_SECONDS - PERSON_B_OFFSET;
+        if (customerEndTime > 0) {
+          const chunkB = await cutWavChunk(personBPath, 0, customerEndTime);
+          if (chunkB) {
+            const { promise } = whisperContextRef.current.transcribe(chunkB, {
+              language: 'ja', maxLen: 0, tokenTimestamps: true,
+              temperature: 0, temperatureInc: 0.2, noSpeechThold: 0.6,
+            });
+            const result = await promise;
+            segsB = (result?.segments || []).map(s => ({
+              text: s.text?.trim() || '',
+              startTime: PERSON_B_OFFSET + (s.t0 || 0) / 100,
+              endTime: PERSON_B_OFFSET + (s.t1 || 0) / 100,
+              speaker: 'B',
+            }));
+            await RNFS.unlink(chunkB).catch(() => {});
+          }
         }
       }
 
@@ -584,8 +586,7 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
 
     try {
       const personAPath = await getAudioFilePath('personA');
-      const personBPath = await getAudioFilePath('personBTrimmed');
-      if (!personAPath || !personBPath) throw new Error('音声ファイルの読み込みに失敗しました');
+      if (!personAPath) throw new Error('音声ファイルの読み込みに失敗しました');
 
       // Transcribe FULL Operator audio
       const { promise: promiseA } = whisperContextRef.current.transcribe(personAPath, {
@@ -597,18 +598,24 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
         text: s.text?.trim() || '', startTime: (s.t0 || 0) / 100, endTime: (s.t1 || 0) / 100, speaker: 'A',
       }));
 
-      // Transcribe FULL Customer audio
-      const { promise: promiseB } = whisperContextRef.current.transcribe(personBPath, {
-        language: 'ja', maxLen: 0, tokenTimestamps: true,
-        temperature: 0, temperatureInc: 0.2, noSpeechThold: 0.6,
-      });
-      const resultB = await promiseB;
-      const segsB = (resultB?.segments || []).map(s => ({
-        text: s.text?.trim() || '',
-        startTime: PERSON_B_OFFSET + (s.t0 || 0) / 100,
-        endTime: PERSON_B_OFFSET + (s.t1 || 0) / 100,
-        speaker: 'B',
-      }));
+      let segsB = [];
+      // Transcribe FULL Customer audio - only for 2-speaker mode
+      if (!singleSpeaker) {
+        const personBPath = await getAudioFilePath('personBTrimmed');
+        if (personBPath) {
+          const { promise: promiseB } = whisperContextRef.current.transcribe(personBPath, {
+            language: 'ja', maxLen: 0, tokenTimestamps: true,
+            temperature: 0, temperatureInc: 0.2, noSpeechThold: 0.6,
+          });
+          const resultB = await promiseB;
+          segsB = (resultB?.segments || []).map(s => ({
+            text: s.text?.trim() || '',
+            startTime: PERSON_B_OFFSET + (s.t0 || 0) / 100,
+            endTime: PERSON_B_OFFSET + (s.t1 || 0) / 100,
+            speaker: 'B',
+          }));
+        }
+      }
 
       const noise = ['(音楽)', '[音楽]', '♪', '🎵'];
       const allSegs = [...segsA, ...segsB]
@@ -789,27 +796,39 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
           )}
         </View>
 
-        {/* Conversation Chat */}
+        {/* Conversation Content */}
         {conversation.length > 0 && (
           <View style={styles.chatSection}>
             <Text style={styles.chatTitle}>通話内容</Text>
 
-            {conversation.map((item, index) => (
-              <View
-                key={index}
-                style={item.speaker === 'A' ? styles.chatBubbleA : styles.chatBubbleB}
-              >
-                <View style={styles.chatHeader}>
-                  <Text style={[styles.chatSpeaker, { color: item.speaker === 'A' ? '#1976D2' : '#C2185B' }]}>
-                    {item.speaker === 'A' ? 'オペレーター' : 'お客様'}
+            {singleSpeaker ? (
+              /* Single Speaker Mode - Paragraph Style */
+              <View style={styles.paragraphContainer}>
+                {conversation.map((item, index) => (
+                  <Text key={index} style={styles.paragraphText}>
+                    {item.text}
                   </Text>
-                  <Text style={styles.chatTime}>
-                    {item.startTime.toFixed(1)}s
-                  </Text>
-                </View>
-                <Text style={styles.chatText}>{item.text}</Text>
+                ))}
               </View>
-            ))}
+            ) : (
+              /* Two Speakers Mode - Chat Style */
+              conversation.map((item, index) => (
+                <View
+                  key={index}
+                  style={item.speaker === 'A' ? styles.chatBubbleA : styles.chatBubbleB}
+                >
+                  <View style={styles.chatHeader}>
+                    <Text style={[styles.chatSpeaker, { color: item.speaker === 'A' ? '#1976D2' : '#C2185B' }]}>
+                      {item.speaker === 'A' ? 'オペレーター' : 'お客様'}
+                    </Text>
+                    <Text style={styles.chatTime}>
+                      {item.startTime.toFixed(1)}s
+                    </Text>
+                  </View>
+                  <Text style={styles.chatText}>{item.text}</Text>
+                </View>
+              ))
+            )}
 
             {/* Show more button - only when initial transcription */}
             {isInitialOnly && !isTranscribing && (
@@ -1126,6 +1145,19 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#222',
     lineHeight: 22,
+  },
+  // Paragraph style for single speaker
+  paragraphContainer: {
+    backgroundColor: '#f8f9fa',
+    padding: 16,
+    borderRadius: 12,
+  },
+  paragraphText: {
+    fontSize: 15,
+    color: '#333',
+    lineHeight: 26,
+    marginBottom: 12,
+    textAlign: 'justify',
   },
   // Show More buttons
   showMoreContainer: {

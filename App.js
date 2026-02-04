@@ -580,6 +580,7 @@ export default function App() {
         <CallDetailScreen
           callData={selectedCallData}
           onBack={navigateBackFromCallDetail}
+          singleSpeaker={selectedCallData?.singleSpeaker || false}
         />
       </View>
     );
