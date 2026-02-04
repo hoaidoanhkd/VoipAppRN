@@ -34,19 +34,6 @@ const HomeScreen = ({ user, onNavigateToCallDetail, connectionStatus }) => {
         </View>
       </View>
 
-      {/* User Info Card */}
-      <View style={styles.userCard}>
-        <View style={styles.userAvatar}>
-          <Text style={styles.userAvatarText}>
-            {(user?.display_name || user?.username || '?').charAt(0).toUpperCase()}
-          </Text>
-        </View>
-        <View style={styles.userInfo}>
-          <Text style={styles.userName}>{user?.display_name || user?.username}</Text>
-          <Text style={styles.userId}>@{user?.username}</Text>
-        </View>
-      </View>
-
       {/* Main Action Section */}
       <View style={styles.actionSection}>
         <Text style={styles.sectionTitle}>通話履歴</Text>
@@ -66,25 +53,6 @@ const HomeScreen = ({ user, onNavigateToCallDetail, connectionStatus }) => {
           </View>
           <Text style={styles.actionArrow}>›</Text>
         </TouchableOpacity>
-      </View>
-
-      {/* Quick Stats */}
-      <View style={styles.statsSection}>
-        <View style={styles.statCard}>
-          <Text style={styles.statIcon}>📞</Text>
-          <Text style={styles.statValue}>12</Text>
-          <Text style={styles.statLabel}>Total Calls</Text>
-        </View>
-        <View style={styles.statCard}>
-          <Text style={styles.statIcon}>⏱️</Text>
-          <Text style={styles.statValue}>45m</Text>
-          <Text style={styles.statLabel}>Talk Time</Text>
-        </View>
-        <View style={styles.statCard}>
-          <Text style={styles.statIcon}>📥</Text>
-          <Text style={styles.statValue}>8</Text>
-          <Text style={styles.statLabel}>Incoming</Text>
-        </View>
       </View>
     </View>
   );
@@ -128,41 +96,6 @@ const styles = StyleSheet.create({
     fontSize: FontSize.xs,
     color: Colors.textSecondary,
     fontWeight: '500',
-  },
-  userCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    margin: Spacing.lg,
-    padding: Spacing.lg,
-    backgroundColor: Colors.backgroundSecondary,
-    borderRadius: BorderRadius.xl,
-  },
-  userAvatar: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: Colors.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  userAvatarText: {
-    fontSize: FontSize.xl,
-    fontWeight: '600',
-    color: Colors.textWhite,
-  },
-  userInfo: {
-    marginLeft: Spacing.lg,
-    flex: 1,
-  },
-  userName: {
-    fontSize: FontSize.lg,
-    fontWeight: '600',
-    color: Colors.textPrimary,
-  },
-  userId: {
-    fontSize: FontSize.sm,
-    color: Colors.textSecondary,
-    marginTop: 2,
   },
   actionSection: {
     padding: Spacing.lg,
@@ -213,32 +146,6 @@ const styles = StyleSheet.create({
   actionArrow: {
     fontSize: 28,
     color: Colors.textSecondary,
-  },
-  statsSection: {
-    flexDirection: 'row',
-    paddingHorizontal: Spacing.lg,
-    gap: Spacing.md,
-  },
-  statCard: {
-    flex: 1,
-    backgroundColor: Colors.backgroundSecondary,
-    padding: Spacing.lg,
-    borderRadius: BorderRadius.xl,
-    alignItems: 'center',
-  },
-  statIcon: {
-    fontSize: 24,
-    marginBottom: Spacing.sm,
-  },
-  statValue: {
-    fontSize: FontSize.xl,
-    fontWeight: '700',
-    color: Colors.textPrimary,
-  },
-  statLabel: {
-    fontSize: FontSize.xs,
-    color: Colors.textSecondary,
-    marginTop: 4,
   },
 });
 

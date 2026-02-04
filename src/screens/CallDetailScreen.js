@@ -23,9 +23,13 @@ import Video from 'react-native-video';
 import RNFS from 'react-native-fs';
 import { initWhisper } from 'whisper.rn';
 
-// Whisper Model URL
-const MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin';
-const MODEL_FILENAME = 'ggml-small.bin';
+// Whisper Model URL - Using base model for balance between size and accuracy
+// tiny: 75MB, ~1GB RAM (fastest, lowest accuracy)
+// base: 142MB, ~1GB RAM (good balance) ← recommended for mobile
+// small: 465MB, ~2GB RAM (better accuracy but may fail on low-memory devices)
+const MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin';
+const MODEL_FILENAME = 'ggml-base.bin';
+const MODEL_EXPECTED_SIZE = 147951465; // ~142MB for base model
 
 
 // Audio files
@@ -176,7 +180,9 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
   const playerRef = useRef(null);
 
   // Whisper states
-  const [whisperContext, setWhisperContext] = useState(null);
+  // Use useRef to prevent context loss on re-renders (best practice)
+  const whisperContextRef = useRef(null);
+  const isMountedRef = useRef(true); // Track if component is mounted
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [modelProgress, setModelProgress] = useState(0);
   const [modelReady, setModelReady] = useState(false);
@@ -215,10 +221,17 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
 
   // Initialize Whisper
   useEffect(() => {
+    isMountedRef.current = true;
     checkAndLoadModel();
     return () => {
-      if (whisperContext) {
-        whisperContext.release();
+      isMountedRef.current = false;
+      // Release whisper context
+      if (whisperContextRef.current) {
+        try {
+          whisperContextRef.current.release();
+        } catch (e) {
+          console.log('[Whisper] release error (ignored):', e);
+        }
       }
     };
   }, []);
@@ -232,6 +245,20 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     const modelPath = getModelPath();
     const exists = await RNFS.exists(modelPath);
     if (exists) {
+      // Check file size to detect corrupted/partial downloads
+      try {
+        const stat = await RNFS.stat(modelPath);
+        const fileSize = parseInt(stat.size, 10);
+        // Allow 5% tolerance for size check
+        if (fileSize < MODEL_EXPECTED_SIZE * 0.95) {
+          console.log(`[Whisper] Model file corrupted: ${fileSize} < ${MODEL_EXPECTED_SIZE}`);
+          await RNFS.unlink(modelPath);
+          console.log('[Whisper] Deleted corrupted model file');
+          return; // Don't initialize, let user download again
+        }
+      } catch (e) {
+        console.log('[Whisper] Could not check file size:', e);
+      }
       await initializeWhisper(modelPath);
     }
   };
@@ -253,35 +280,83 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
         fromUrl: MODEL_URL,
         toFile: modelPath,
         progress: (res) => {
-          const prog = (res.bytesWritten / res.contentLength) * 100;
-          setModelProgress(Math.round(prog));
+          // Only update state if still mounted
+          if (isMountedRef.current) {
+            const prog = (res.bytesWritten / res.contentLength) * 100;
+            setModelProgress(Math.round(prog));
+          }
         },
         progressDivider: 1,
       });
 
       const result = await downloadResult.promise;
+
+      // Check if component unmounted during download
+      if (!isMountedRef.current) {
+        // Clean up partial/complete download since user left
+        try { await RNFS.unlink(modelPath); } catch (e) {}
+        return;
+      }
+
       if (result.statusCode === 200) {
         await initializeWhisper(modelPath);
       } else {
+        // Clean up partial download
+        try { await RNFS.unlink(modelPath); } catch (e) {}
         Alert.alert('エラー', 'モデルのダウンロードに失敗しました');
       }
     } catch (error) {
-      Alert.alert('エラー', `ダウンロード失敗: ${error.message}`);
+      // Clean up partial download on error
+      try { await RNFS.unlink(modelPath); } catch (e) {}
+      if (isMountedRef.current) {
+        Alert.alert('エラー', `ダウンロード失敗: ${error.message}`);
+      }
     } finally {
-      setIsModelLoading(false);
+      if (isMountedRef.current) {
+        setIsModelLoading(false);
+      }
     }
   };
 
   const initializeWhisper = async (modelPath) => {
     try {
+      if (!isMountedRef.current) return;
       setIsModelLoading(true);
+      console.log('[Whisper] Initializing with path:', modelPath);
       const context = await initWhisper({ filePath: modelPath });
-      setWhisperContext(context);
+
+      if (!isMountedRef.current) return;
+
+      // Validate context
+      if (!context) {
+        throw new Error('Context is null');
+      }
+
+      console.log('[Whisper] Context created successfully');
+      whisperContextRef.current = context;
       setModelReady(true);
     } catch (error) {
-      Alert.alert('エラー', `Whisper初期化失敗: ${error.message}`);
+      console.error('[Whisper] Init failed:', error);
+      // Delete corrupted model file
+      try {
+        await RNFS.unlink(modelPath);
+        console.log('[Whisper] Deleted corrupted model');
+      } catch (e) {}
+      // Ask user to re-download (only if still mounted)
+      if (isMountedRef.current) {
+        Alert.alert(
+          'エラー',
+          'モデルファイルが破損しています。再ダウンロードしますか？',
+          [
+            { text: 'キャンセル', style: 'cancel' },
+            { text: '再ダウンロード', onPress: () => downloadModel() },
+          ]
+        );
+      }
     } finally {
-      setIsModelLoading(false);
+      if (isMountedRef.current) {
+        setIsModelLoading(false);
+      }
     }
   };
 
@@ -358,7 +433,7 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
       throw new Error(`音声ファイルのパスを取得できません: ${trackKey}`);
     }
 
-    const { promise } = whisperContext.transcribe(audioPath, {
+    const { promise } = whisperContextRef.current.transcribe(audioPath, {
       language: 'ja',
       maxLen: 0,
       tokenTimestamps: true,
@@ -385,7 +460,7 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
       throw new Error(`音声ファイルのパスを取得できません: ${trackKey}`);
     }
 
-    const { promise } = whisperContext.transcribe(audioPath, {
+    const { promise } = whisperContextRef.current.transcribe(audioPath, {
       language: 'ja',
       maxLen: 0,
       tokenTimestamps: true,
@@ -449,7 +524,7 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
 
   // Quick Fix: Transcribe stereo file for correct timestamps, then identify speakers
   const transcribeConversation = async () => {
-    if (!whisperContext) {
+    if (!whisperContextRef.current) {
       Alert.alert('エラー', 'Whisperモデルをダウンロードしてください');
       return;
     }

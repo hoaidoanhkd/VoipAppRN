@@ -10,6 +10,7 @@ import {
   Vibration,
   Platform,
   ActivityIndicator,
+  BackHandler,
 } from 'react-native';
 import InCallManager from 'react-native-incall-manager';
 import { Colors, Spacing, FontSize, BorderRadius } from './src/theme/colors';
@@ -31,21 +32,8 @@ import permissionService from './src/services/permissions';
 import {
   AuthScreen,
   HomeScreen,
-  ContactsScreen,
-  CallHistoryScreen,
-  ProfileScreen,
-  RecordingsScreen,
   CallDetailScreen,
 } from './src/screens';
-
-// Tabs
-const TABS = {
-  HOME: 'home',
-  CONTACTS: 'contacts',
-  HISTORY: 'history',
-  RECORDINGS: 'recordings',
-  PROFILE: 'profile',
-};
 
 // Call states
 const CALL_STATE = {
@@ -61,7 +49,6 @@ export default function App() {
   const [user, setUser] = useState(null);
 
   // Navigation state
-  const [activeTab, setActiveTab] = useState(TABS.HOME);
   const [showCallDetail, setShowCallDetail] = useState(false);
   const [selectedCallData, setSelectedCallData] = useState(null);
 
@@ -87,6 +74,19 @@ export default function App() {
     initializeApp();
     return () => cleanup();
   }, []);
+
+  // Handle Android back button
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (showCallDetail) {
+        navigateBackFromCallDetail();
+        return true; // Prevent default (exit app)
+      }
+      return false; // Allow default behavior
+    });
+
+    return () => backHandler.remove();
+  }, [showCallDetail]);
 
   // Call timer
   useEffect(() => {
@@ -419,11 +419,6 @@ export default function App() {
     setUser(null);
     cleanup();
     setConnectionStatus('disconnected');
-    setActiveTab(TABS.HOME);
-  };
-
-  const handleProfileUpdate = (updatedUser) => {
-    setUser(updatedUser);
   };
 
   // === Navigation Handlers ===
@@ -590,100 +585,16 @@ export default function App() {
     );
   }
 
-  // Main app with tabs
+  // Main app - Home only
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor={Colors.background} />
-
-      {/* Main Content */}
       <View style={styles.mainContent}>
-        {activeTab === TABS.HOME && (
-          <HomeScreen
-            user={user}
-            onNavigateToCallDetail={navigateToCallDetail}
-            connectionStatus={connectionStatus}
-          />
-        )}
-        {activeTab === TABS.CONTACTS && (
-          <ContactsScreen
-            currentUser={user}
-            onCallUser={startCall}
-          />
-        )}
-        {activeTab === TABS.HISTORY && (
-          <CallHistoryScreen
-            currentUser={user}
-            onCallUser={startCall}
-          />
-        )}
-        {activeTab === TABS.RECORDINGS && (
-          <RecordingsScreen />
-        )}
-        {activeTab === TABS.PROFILE && (
-          <ProfileScreen
-            user={user}
-            onLogout={handleLogout}
-            onProfileUpdate={handleProfileUpdate}
-          />
-        )}
-      </View>
-
-      {/* Bottom Tab Bar */}
-      <View style={styles.tabBar}>
-        <TouchableOpacity
-          style={styles.tab}
-          onPress={() => setActiveTab(TABS.HOME)}
-          activeOpacity={0.7}
-        >
-          <Text style={[styles.tabIcon, activeTab === TABS.HOME && styles.tabIconActive]}>🏠</Text>
-          <Text style={[styles.tabLabel, activeTab === TABS.HOME && styles.tabLabelActive]}>
-            Home
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.tab}
-          onPress={() => setActiveTab(TABS.CONTACTS)}
-          activeOpacity={0.7}
-        >
-          <Text style={[styles.tabIcon, activeTab === TABS.CONTACTS && styles.tabIconActive]}>👥</Text>
-          <Text style={[styles.tabLabel, activeTab === TABS.CONTACTS && styles.tabLabelActive]}>
-            Contacts
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.tab}
-          onPress={() => setActiveTab(TABS.HISTORY)}
-          activeOpacity={0.7}
-        >
-          <Text style={[styles.tabIcon, activeTab === TABS.HISTORY && styles.tabIconActive]}>🕐</Text>
-          <Text style={[styles.tabLabel, activeTab === TABS.HISTORY && styles.tabLabelActive]}>
-            Recent
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.tab}
-          onPress={() => setActiveTab(TABS.RECORDINGS)}
-          activeOpacity={0.7}
-        >
-          <Text style={[styles.tabIcon, activeTab === TABS.RECORDINGS && styles.tabIconActive]}>🎵</Text>
-          <Text style={[styles.tabLabel, activeTab === TABS.RECORDINGS && styles.tabLabelActive]}>
-            Mixer
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.tab}
-          onPress={() => setActiveTab(TABS.PROFILE)}
-          activeOpacity={0.7}
-        >
-          <Text style={[styles.tabIcon, activeTab === TABS.PROFILE && styles.tabIconActive]}>⚙️</Text>
-          <Text style={[styles.tabLabel, activeTab === TABS.PROFILE && styles.tabLabelActive]}>
-            Settings
-          </Text>
-        </TouchableOpacity>
+        <HomeScreen
+          user={user}
+          onNavigateToCallDetail={navigateToCallDetail}
+          connectionStatus={connectionStatus}
+        />
       </View>
     </SafeAreaView>
   );
@@ -723,37 +634,6 @@ const styles = StyleSheet.create({
   // Main Content
   mainContent: {
     flex: 1,
-  },
-
-  // Tab Bar
-  tabBar: {
-    flexDirection: 'row',
-    backgroundColor: Colors.tabBackground,
-    borderTopWidth: 1,
-    borderTopColor: Colors.divider,
-    paddingBottom: Platform.OS === 'ios' ? 20 : 8,
-    paddingTop: Spacing.sm,
-  },
-  tab: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: Spacing.xs,
-  },
-  tabIcon: {
-    fontSize: 24,
-    marginBottom: 2,
-  },
-  tabIconActive: {
-    transform: [{ scale: 1.1 }],
-  },
-  tabLabel: {
-    fontSize: FontSize.xs,
-    color: Colors.tabInactive,
-    fontWeight: '500',
-  },
-  tabLabelActive: {
-    color: Colors.tabActive,
-    fontWeight: '600',
   },
 
   // Call Screen
