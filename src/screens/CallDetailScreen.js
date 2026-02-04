@@ -31,6 +31,9 @@ const MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggm
 const MODEL_FILENAME = 'ggml-base.bin';
 const MODEL_EXPECTED_SIZE = 147951465; // ~142MB for base model
 
+// Display settings
+const DISPLAY_CHUNK = 15; // seconds to show at a time
+
 
 // Audio files
 const AUDIO_FILES = {
@@ -190,9 +193,9 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
   const [transcribeStatus, setTranscribeStatus] = useState('');
 
   // Transcription states
-  const [segmentsA, setSegmentsA] = useState([]);
-  const [segmentsB, setSegmentsB] = useState([]);
   const [conversation, setConversation] = useState([]);
+  const [showUpTo, setShowUpTo] = useState(DISPLAY_CHUNK); // How many seconds to display
+  const [hasTranscribed, setHasTranscribed] = useState(false); // Transcription completed
 
   // Default data
   const data = {
@@ -222,6 +225,10 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
   // Initialize Whisper
   useEffect(() => {
     isMountedRef.current = true;
+    // Reset transcription state on mount
+    setConversation([]);
+    setShowUpTo(DISPLAY_CHUNK);
+    setHasTranscribed(false);
     checkAndLoadModel();
     return () => {
       isMountedRef.current = false;
@@ -235,6 +242,13 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
       }
     };
   }, []);
+
+  // Auto-transcribe when model is ready
+  useEffect(() => {
+    if (modelReady && !hasTranscribed && !isTranscribing) {
+      transcribeAll();
+    }
+  }, [modelReady]);
 
   // Note: Conversation is now built in transcribeConversation() using merged audio
   // This useEffect is kept for backward compatibility but not used with new method
@@ -522,8 +536,8 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     return bestScore;
   };
 
-  // Quick Fix: Transcribe stereo file for correct timestamps, then identify speakers
-  const transcribeConversation = async () => {
+  // Transcribe all audio (full transcription, display progressively)
+  const transcribeAll = async () => {
     if (!whisperContextRef.current) {
       Alert.alert('エラー', 'Whisperモデルをダウンロードしてください');
       return;
@@ -531,45 +545,33 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
 
     setIsTranscribing(true);
     setConversation([]);
+    setShowUpTo(DISPLAY_CHUNK);
 
     try {
-      // Step 1: Transcribe Operator file
-      setTranscribeStatus('オペレーター音声を解析中... (1/2)');
-      const segsA = await transcribeSingleAudioRaw('personA');
-      console.log('Operator segments:', segsA.length, segsA.map(s => s.text));
+      setTranscribeStatus('文字起こし中...');
 
-      // Step 2: Transcribe Customer file (use trimmed version to avoid hallucination)
-      setTranscribeStatus('お客様音声を解析中... (2/2)');
+      // Step 1: Transcribe Operator file
+      const segsA = await transcribeSingleAudioRaw('personA');
+      console.log('Operator segments:', segsA.length);
+
+      // Step 2: Transcribe Customer file
       const segsB = await transcribeSingleAudioRaw('personBTrimmed');
-      // Add offset to timestamps since silence was trimmed from beginning
+      // Add offset for trimmed audio
       segsB.forEach(seg => {
         seg.startTime += PERSON_B_OFFSET;
         seg.endTime += PERSON_B_OFFSET;
       });
-      console.log('Customer segments:', segsB.length, segsB.map(s => `${s.startTime.toFixed(1)}s: ${s.text}`));
+      console.log('Customer segments:', segsB.length);
 
-      // Step 3: Label speakers and merge by timestamp
-      setTranscribeStatus('会話を構築中...');
+      // Step 3: Label and merge
+      const operatorSegs = segsA.map(seg => ({ ...seg, speaker: 'A' }));
+      const customerSegs = segsB.map(seg => ({ ...seg, speaker: 'B' }));
+      const allSegments = [...operatorSegs, ...customerSegs].sort((a, b) => a.startTime - b.startTime);
 
-      const operatorSegs = segsA.map(seg => ({
-        ...seg,
-        speaker: 'A', // Operator
-      }));
-
-      const customerSegs = segsB.map(seg => ({
-        ...seg,
-        speaker: 'B', // Customer
-      }));
-
-      // Merge and sort by startTime
-      const allSegments = [...operatorSegs, ...customerSegs]
-        .sort((a, b) => a.startTime - b.startTime);
-
-      console.log('Final conversation:', allSegments.map(s =>
-        `${s.speaker}(${s.startTime.toFixed(1)}s): ${s.text.substring(0, 15)}`
-      ));
+      console.log('Total segments:', allSegments.length);
 
       setConversation(allSegments);
+      setHasTranscribed(true);
       setTranscribeStatus('');
     } catch (error) {
       console.error('Transcription error:', error);
@@ -580,12 +582,19 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     }
   };
 
+  // Show more conversation (display next chunk)
+  const showMore = () => {
+    setShowUpTo(prev => prev + DISPLAY_CHUNK);
+  };
+
   // Audio player handlers
   const togglePlay = () => {
     setIsPlaying(!isPlaying);
   };
 
-  const onLoad = (data) => setDuration(data.duration);
+  const onLoad = (data) => {
+    setDuration(data.duration);
+  };
   const onProgress = (data) => {
     setCurrentTime(data.currentTime);
     setProgress(duration > 0 ? (data.currentTime / duration) * 100 : 0);
@@ -712,22 +721,12 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
             </TouchableOpacity>
           </View>
 
-          {/* Transcribe Button - inside player */}
-          {modelReady && (
-            <TouchableOpacity
-              style={[styles.transcribeMainBtn, isTranscribing && styles.btnDisabled]}
-              onPress={transcribeConversation}
-              disabled={isTranscribing}
-            >
-              {isTranscribing ? (
-                <View style={styles.transcribeLoading}>
-                  <ActivityIndicator color="#fff" size="small" />
-                  <Text style={styles.transcribeBtnText}> {transcribeStatus || '処理中...'}</Text>
-                </View>
-              ) : (
-                <Text style={styles.transcribeBtnText}>文字起こし</Text>
-              )}
-            </TouchableOpacity>
+          {/* Transcribe Status - inside player */}
+          {modelReady && isTranscribing && (
+            <View style={styles.transcribeStatusBar}>
+              <ActivityIndicator color="#1a7a6d" size="small" />
+              <Text style={styles.transcribeStatusText}>{transcribeStatus || '処理中...'}</Text>
+            </View>
           )}
 
           {/* Download Model Button if not ready */}
@@ -743,35 +742,55 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
                   <Text style={styles.transcribeBtnText}> ダウンロード中 {modelProgress}%</Text>
                 </View>
               ) : (
-                <Text style={styles.transcribeBtnText}>⬇️ Whisperモデルをダウンロード</Text>
+                <Text style={styles.transcribeBtnText}>Whisperモデルをダウンロード</Text>
               )}
             </TouchableOpacity>
           )}
         </View>
 
-        {/* Conversation Chat */}
-        {conversation.length > 0 && (
-          <View style={styles.chatSection}>
-            <Text style={styles.chatTitle}>💬 会話内容 ({conversation.length}件)</Text>
+        {/* Conversation Chat - show progressively */}
+        {hasTranscribed && conversation.length > 0 && (() => {
+          // Filter to show only up to showUpTo seconds
+          const visibleConversation = conversation.filter(item => item.startTime <= showUpTo);
+          const maxTime = Math.max(...conversation.map(item => item.endTime || item.startTime));
+          const hasMore = showUpTo < maxTime;
 
-            {conversation.map((item, index) => (
-              <View
-                key={index}
-                style={item.speaker === 'A' ? styles.chatBubbleA : styles.chatBubbleB}
-              >
-                <View style={styles.chatHeader}>
-                  <Text style={[styles.chatSpeaker, { color: item.speaker === 'A' ? '#1976D2' : '#C2185B' }]}>
-                    {item.speaker === 'A' ? '🎧 オペレーター' : '👤 お客様'}
-                  </Text>
-                  <Text style={styles.chatTime}>
-                    {item.startTime.toFixed(1)}s
-                  </Text>
+          return (
+            <View style={styles.chatSection}>
+              <Text style={styles.chatTitle}>会話内容 ({visibleConversation.length}/{conversation.length}件)</Text>
+
+              {visibleConversation.map((item, index) => (
+                <View
+                  key={index}
+                  style={item.speaker === 'A' ? styles.chatBubbleA : styles.chatBubbleB}
+                >
+                  <View style={styles.chatHeader}>
+                    <Text style={[styles.chatSpeaker, { color: item.speaker === 'A' ? '#1976D2' : '#C2185B' }]}>
+                      {item.speaker === 'A' ? 'オペレーター' : 'お客様'}
+                    </Text>
+                    <Text style={styles.chatTime}>
+                      {item.startTime.toFixed(1)}s
+                    </Text>
+                  </View>
+                  <Text style={styles.chatText}>{item.text}</Text>
                 </View>
-                <Text style={styles.chatText}>{item.text}</Text>
-              </View>
-            ))}
-          </View>
-        )}
+              ))}
+
+              {/* Show All button */}
+              {hasMore && (
+                <View style={styles.showMoreContainer}>
+                  <TouchableOpacity
+                    style={styles.showMoreBtn}
+                    onPress={() => setShowUpTo(9999)}
+                  >
+                    <Text style={styles.showMoreText}>すべて表示</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+            </View>
+          );
+        })()}
 
         <View style={{ height: 40 }} />
       </ScrollView>
@@ -1069,6 +1088,72 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#222',
     lineHeight: 22,
+  },
+  // Show More buttons
+  showMoreContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 12,
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  showMoreBtn: {
+    backgroundColor: '#1a7a6d',
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 20,
+  },
+  showMoreText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  loadingMoreContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 16,
+    marginTop: 8,
+  },
+  loadingMoreText: {
+    color: '#1a7a6d',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  allLoadedText: {
+    textAlign: 'center',
+    color: '#888',
+    fontSize: 13,
+    marginTop: 12,
+    fontStyle: 'italic',
+  },
+  // Transcribe status bar (auto-transcribing)
+  transcribeStatusBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    gap: 10,
+    marginTop: 16,
+    backgroundColor: '#E8F5F2',
+    borderRadius: 12,
+  },
+  transcribeStatusText: {
+    color: '#1a7a6d',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  retranscribeBtn: {
+    alignSelf: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    marginTop: 16,
+  },
+  retranscribeText: {
+    color: '#888',
+    fontSize: 13,
+    fontWeight: '500',
   },
 });
 
