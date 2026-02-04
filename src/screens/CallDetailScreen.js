@@ -31,8 +31,11 @@ const MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggm
 const MODEL_FILENAME = 'ggml-base.bin';
 const MODEL_EXPECTED_SIZE = 147951465; // ~142MB for base model
 
-// Display settings
-const DISPLAY_CHUNK = 15; // seconds to show at a time
+// Lazy load settings
+const CHUNK_SECONDS = 15; // seconds per chunk for lazy transcription
+const SAMPLE_RATE = 16000; // WAV sample rate
+const BYTES_PER_SAMPLE = 2; // 16-bit audio
+const NUM_CHANNELS = 1; // mono
 
 
 // Audio files
@@ -192,10 +195,11 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeStatus, setTranscribeStatus] = useState('');
 
-  // Transcription states
+  // Transcription states (lazy load)
   const [conversation, setConversation] = useState([]);
-  const [showUpTo, setShowUpTo] = useState(DISPLAY_CHUNK); // How many seconds to display
-  const [hasTranscribed, setHasTranscribed] = useState(false); // Transcription completed
+  const [transcribedUpTo, setTranscribedUpTo] = useState(0); // Seconds transcribed so far
+  const [totalAudioDuration, setTotalAudioDuration] = useState(50); // Will be updated from audio
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   // Default data
   const data = {
@@ -227,8 +231,7 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     isMountedRef.current = true;
     // Reset transcription state on mount
     setConversation([]);
-    setShowUpTo(DISPLAY_CHUNK);
-    setHasTranscribed(false);
+    setTranscribedUpTo(0);
     checkAndLoadModel();
     return () => {
       isMountedRef.current = false;
@@ -243,10 +246,10 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     };
   }, []);
 
-  // Auto-transcribe when model is ready
+  // Auto-transcribe first chunk when model is ready
   useEffect(() => {
-    if (modelReady && !hasTranscribed && !isTranscribing) {
-      transcribeAll();
+    if (modelReady && transcribedUpTo === 0 && !isTranscribing) {
+      transcribeNextChunk();
     }
   }, [modelReady]);
 
@@ -440,151 +443,344 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     }
   };
 
-  // Transcribe single audio file
-  const transcribeSingleAudio = async (trackKey) => {
-    const audioPath = await getAudioFilePath(trackKey);
-    if (!audioPath) {
-      throw new Error(`音声ファイルのパスを取得できません: ${trackKey}`);
+  // Decode base64 to Uint8Array (React Native compatible)
+  const base64ToUint8Array = (base64) => {
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
     }
-
-    const { promise } = whisperContextRef.current.transcribe(audioPath, {
-      language: 'ja',
-      maxLen: 0,
-      tokenTimestamps: true,
-      wordTimestamps: true,
-    });
-
-    const result = await promise;
-    const segments = result?.segments || [];
-
-    // t0/t1 are in centiseconds (1/100 second)
-    const parsedSegments = segments.map(s => ({
-      text: s.text?.trim() || '',
-      startTime: (s.t0 || 0) / 100,
-      endTime: (s.t1 || 0) / 100,
-    })).filter(item => item.text && item.text !== '(音楽)' && item.text !== '');
-
-    return parsedSegments;
+    return bytes;
   };
 
-  // Transcribe without silence detection (raw timestamps from Whisper)
-  const transcribeSingleAudioRaw = async (trackKey) => {
-    const audioPath = await getAudioFilePath(trackKey);
-    if (!audioPath) {
-      throw new Error(`音声ファイルのパスを取得できません: ${trackKey}`);
+  // Encode Uint8Array to base64 (React Native compatible)
+  const uint8ArrayToBase64 = (bytes) => {
+    let binary = '';
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
     }
-
-    const { promise } = whisperContextRef.current.transcribe(audioPath, {
-      language: 'ja',
-      maxLen: 0,
-      tokenTimestamps: true,
-      // Anti-hallucination settings
-      temperature: 0,
-      temperatureInc: 0.2,
-      noSpeechThold: 0.6,
-      entropy_thold: 2.4,
-    });
-
-    const result = await promise;
-    const segments = result?.segments || [];
-
-    // Filter out noise only (music/silence markers)
-    const noise = ['(音楽)', '[音楽]', '♪', '🎵'];
-
-    return segments.map(s => ({
-      text: s.text?.trim() || '',
-      startTime: (s.t0 || 0) / 100,
-      endTime: (s.t1 || 0) / 100,
-    })).filter(item => {
-      if (!item.text) return false;
-      // Filter out music/noise markers
-      for (const n of noise) {
-        if (item.text.includes(n)) return false;
-      }
-      return true;
-    });
+    return btoa(binary);
   };
 
-  // Normalize text for comparison
-  const normalizeText = (text) => {
-    return (text || '')
-      .toLowerCase()
-      .replace(/[、。？！\s　]/g, '')
-      .replace(/[ぁ-ん]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60)); // hiragana to katakana
-  };
+  // Cut WAV file to extract a specific time range using JavaScript
+  // Returns path to the cut WAV file
+  const cutWavChunk = async (inputPath, startTime, endTime) => {
+    try {
+      // Read the entire WAV file as base64
+      const wavBase64 = await RNFS.readFile(inputPath, 'base64');
+      const wavBytes = base64ToUint8Array(wavBase64);
 
-  // Find best match score between text and a set of texts
-  const findBestMatch = (text, textSet) => {
-    if (!text || textSet.size === 0) return 0;
+      // Find the data chunk position
+      const { dataSize, dataStart } = findDataChunk(wavBytes);
 
-    let bestScore = 0;
-    for (const candidate of textSet) {
-      // Calculate similarity based on common characters
-      const textChars = new Set(text.split(''));
-      const candidateChars = new Set(candidate.split(''));
-      const intersection = [...textChars].filter(c => candidateChars.has(c)).length;
-      const union = new Set([...textChars, ...candidateChars]).size;
-      const score = union > 0 ? intersection / union : 0;
+      // Calculate byte positions for the chunk
+      const bytesPerSecond = SAMPLE_RATE * BYTES_PER_SAMPLE * NUM_CHANNELS;
+      const startByteOffset = Math.floor(startTime * bytesPerSecond);
+      const endByteOffset = Math.floor(endTime * bytesPerSecond);
 
-      // Also check for substring match
-      if (text.includes(candidate) || candidate.includes(text)) {
-        bestScore = Math.max(bestScore, 0.9);
+      // Ensure we don't exceed data bounds
+      const actualStartByte = dataStart + Math.min(startByteOffset, dataSize);
+      const actualEndByte = dataStart + Math.min(endByteOffset, dataSize);
+      const dataLength = actualEndByte - actualStartByte;
+
+      if (dataLength <= 0) {
+        console.log('[WAV] No data to extract for time range', startTime, '-', endTime);
+        return null;
       }
 
-      bestScore = Math.max(bestScore, score);
+      // Create new WAV file with standard 44-byte header
+      const NEW_HEADER_SIZE = 44;
+      const newWavBytes = new Uint8Array(NEW_HEADER_SIZE + dataLength);
+
+      // Build standard WAV header
+      // RIFF header
+      newWavBytes[0] = 0x52; newWavBytes[1] = 0x49; newWavBytes[2] = 0x46; newWavBytes[3] = 0x46; // "RIFF"
+      const fileSize = NEW_HEADER_SIZE + dataLength - 8;
+      newWavBytes[4] = fileSize & 0xFF;
+      newWavBytes[5] = (fileSize >> 8) & 0xFF;
+      newWavBytes[6] = (fileSize >> 16) & 0xFF;
+      newWavBytes[7] = (fileSize >> 24) & 0xFF;
+      newWavBytes[8] = 0x57; newWavBytes[9] = 0x41; newWavBytes[10] = 0x56; newWavBytes[11] = 0x45; // "WAVE"
+
+      // fmt chunk
+      newWavBytes[12] = 0x66; newWavBytes[13] = 0x6D; newWavBytes[14] = 0x74; newWavBytes[15] = 0x20; // "fmt "
+      newWavBytes[16] = 16; newWavBytes[17] = 0; newWavBytes[18] = 0; newWavBytes[19] = 0; // fmt chunk size = 16
+      newWavBytes[20] = 1; newWavBytes[21] = 0; // PCM format
+      newWavBytes[22] = NUM_CHANNELS; newWavBytes[23] = 0; // channels
+      newWavBytes[24] = SAMPLE_RATE & 0xFF;
+      newWavBytes[25] = (SAMPLE_RATE >> 8) & 0xFF;
+      newWavBytes[26] = (SAMPLE_RATE >> 16) & 0xFF;
+      newWavBytes[27] = (SAMPLE_RATE >> 24) & 0xFF; // sample rate
+      newWavBytes[28] = bytesPerSecond & 0xFF;
+      newWavBytes[29] = (bytesPerSecond >> 8) & 0xFF;
+      newWavBytes[30] = (bytesPerSecond >> 16) & 0xFF;
+      newWavBytes[31] = (bytesPerSecond >> 24) & 0xFF; // byte rate
+      newWavBytes[32] = BYTES_PER_SAMPLE * NUM_CHANNELS; newWavBytes[33] = 0; // block align
+      newWavBytes[34] = BYTES_PER_SAMPLE * 8; newWavBytes[35] = 0; // bits per sample
+
+      // data chunk
+      newWavBytes[36] = 0x64; newWavBytes[37] = 0x61; newWavBytes[38] = 0x74; newWavBytes[39] = 0x61; // "data"
+      newWavBytes[40] = dataLength & 0xFF;
+      newWavBytes[41] = (dataLength >> 8) & 0xFF;
+      newWavBytes[42] = (dataLength >> 16) & 0xFF;
+      newWavBytes[43] = (dataLength >> 24) & 0xFF;
+
+      // Copy audio data
+      for (let i = 0; i < dataLength; i++) {
+        newWavBytes[NEW_HEADER_SIZE + i] = wavBytes[actualStartByte + i];
+      }
+
+      // Convert back to base64 and save
+      const newBase64 = uint8ArrayToBase64(newWavBytes);
+      const outputPath = `${RNFS.DocumentDirectoryPath}/chunk_${startTime}_${endTime}.wav`;
+      await RNFS.writeFile(outputPath, newBase64, 'base64');
+
+      return outputPath;
+    } catch (error) {
+      console.error('[WAV] Cut error:', error);
+      return null;
     }
-    return bestScore;
   };
 
-  // Transcribe all audio (full transcription, display progressively)
-  const transcribeAll = async () => {
+  // Find the position of "data" chunk in WAV file
+  const findDataChunk = (wavBytes) => {
+    // Search for "data" marker (0x64 0x61 0x74 0x61)
+    for (let i = 12; i < Math.min(wavBytes.length - 8, 200); i++) {
+      if (wavBytes[i] === 0x64 && wavBytes[i + 1] === 0x61 &&
+          wavBytes[i + 2] === 0x74 && wavBytes[i + 3] === 0x61) {
+        // Found "data" marker, size is in next 4 bytes
+        const dataSize = wavBytes[i + 4] | (wavBytes[i + 5] << 8) |
+                        (wavBytes[i + 6] << 16) | (wavBytes[i + 7] << 24);
+        const dataStart = i + 8;
+        return { dataSize, dataStart };
+      }
+    }
+    // Fallback: assume data starts at byte 44 and use remaining file
+    return { dataSize: wavBytes.length - 44, dataStart: 44 };
+  };
+
+  // Get total duration of WAV file in seconds
+  const getWavDuration = async (inputPath) => {
+    try {
+      const wavBase64 = await RNFS.readFile(inputPath, 'base64');
+      const wavBytes = base64ToUint8Array(wavBase64);
+
+      const { dataSize, dataStart } = findDataChunk(wavBytes);
+      const bytesPerSecond = SAMPLE_RATE * BYTES_PER_SAMPLE * NUM_CHANNELS;
+
+      return dataSize / bytesPerSecond;
+    } catch (error) {
+      console.error('[WAV] Duration error:', error);
+      return 50; // Default fallback
+    }
+  };
+
+  // Transcribe audio chunk by chunk (lazy load)
+  // Transcribes from transcribedUpTo to transcribedUpTo + CHUNK_SECONDS
+  const transcribeNextChunk = async () => {
     if (!whisperContextRef.current) {
       Alert.alert('エラー', 'Whisperモデルをダウンロードしてください');
       return;
     }
 
+    const startTime = transcribedUpTo;
+    const endTime = startTime + CHUNK_SECONDS;
+
+    // Check if already fully transcribed
+    if (startTime >= totalAudioDuration) {
+      console.log('[Lazy] Already fully transcribed');
+      return;
+    }
+
     setIsTranscribing(true);
-    setConversation([]);
-    setShowUpTo(DISPLAY_CHUNK);
+    setIsLoadingMore(startTime > 0); // First chunk = not "loading more"
+    setTranscribeStatus('文字起こし中...');
 
     try {
-      setTranscribeStatus('文字起こし中...');
+      // Get full audio paths first time and calculate total duration
+      const personAPath = await getAudioFilePath('personA');
+      const personBPath = await getAudioFilePath('personBTrimmed');
 
-      // Step 1: Transcribe Operator file
-      const segsA = await transcribeSingleAudioRaw('personA');
-      console.log('Operator segments:', segsA.length);
+      if (!personAPath || !personBPath) {
+        throw new Error('音声ファイルの読み込みに失敗しました');
+      }
 
-      // Step 2: Transcribe Customer file
-      const segsB = await transcribeSingleAudioRaw('personBTrimmed');
-      // Add offset for trimmed audio
-      segsB.forEach(seg => {
-        seg.startTime += PERSON_B_OFFSET;
-        seg.endTime += PERSON_B_OFFSET;
-      });
-      console.log('Customer segments:', segsB.length);
+      // Update total duration on first chunk
+      if (startTime === 0) {
+        const durationA = await getWavDuration(personAPath);
+        setTotalAudioDuration(Math.ceil(durationA));
+        console.log('[Lazy] Total audio duration:', durationA);
+      }
 
-      // Step 3: Label and merge
-      const operatorSegs = segsA.map(seg => ({ ...seg, speaker: 'A' }));
-      const customerSegs = segsB.map(seg => ({ ...seg, speaker: 'B' }));
-      const allSegments = [...operatorSegs, ...customerSegs].sort((a, b) => a.startTime - b.startTime);
+      // Segments to collect
+      let segsA = [];
+      let segsB = [];
 
-      console.log('Total segments:', allSegments.length);
+      // Cut and transcribe personA chunk
+      const chunkAPath = await cutWavChunk(personAPath, startTime, endTime);
+      if (chunkAPath) {
+        const { promise } = whisperContextRef.current.transcribe(chunkAPath, {
+          language: 'ja',
+          maxLen: 0,
+          tokenTimestamps: true,
+          temperature: 0,
+          temperatureInc: 0.2,
+          noSpeechThold: 0.6,
+        });
+        const result = await promise;
+        segsA = (result?.segments || []).map(s => ({
+          text: s.text?.trim() || '',
+          startTime: startTime + (s.t0 || 0) / 100, // Add chunk offset
+          endTime: startTime + (s.t1 || 0) / 100,
+          speaker: 'A',
+        }));
+        // Clean up chunk file
+        await RNFS.unlink(chunkAPath).catch(() => {});
+      }
 
-      setConversation(allSegments);
-      setHasTranscribed(true);
+      // Calculate time range for personB (considering offset)
+      // PersonB audio starts at PERSON_B_OFFSET in the conversation
+      const personBStartInFile = Math.max(0, startTime - PERSON_B_OFFSET);
+      const personBEndInFile = endTime - PERSON_B_OFFSET;
+
+      if (personBEndInFile > 0) {
+        const chunkBPath = await cutWavChunk(personBPath, personBStartInFile, personBEndInFile);
+        if (chunkBPath) {
+          const { promise } = whisperContextRef.current.transcribe(chunkBPath, {
+            language: 'ja',
+            maxLen: 0,
+            tokenTimestamps: true,
+            temperature: 0,
+            temperatureInc: 0.2,
+            noSpeechThold: 0.6,
+          });
+          const result = await promise;
+          segsB = (result?.segments || []).map(s => ({
+            text: s.text?.trim() || '',
+            // Add both chunk offset and PERSON_B_OFFSET
+            startTime: PERSON_B_OFFSET + personBStartInFile + (s.t0 || 0) / 100,
+            endTime: PERSON_B_OFFSET + personBStartInFile + (s.t1 || 0) / 100,
+            speaker: 'B',
+          }));
+          // Clean up chunk file
+          await RNFS.unlink(chunkBPath).catch(() => {});
+        }
+      }
+
+      // Filter out noise markers
+      const noise = ['(音楽)', '[音楽]', '♪', '🎵'];
+      const filterNoise = (seg) => seg.text.length > 0 && !noise.some(n => seg.text.includes(n));
+
+      const newSegments = [...segsA, ...segsB]
+        .filter(filterNoise)
+        .sort((a, b) => a.startTime - b.startTime);
+
+      console.log(`[Lazy] Chunk ${startTime}-${endTime}s: ${newSegments.length} segments`);
+
+      // Append to conversation
+      setConversation(prev => [...prev, ...newSegments]);
+      setTranscribedUpTo(endTime);
       setTranscribeStatus('');
     } catch (error) {
-      console.error('Transcription error:', error);
+      console.error('[Lazy] Transcription error:', error);
       Alert.alert('エラー', `文字起こし失敗: ${error.message}`);
       setTranscribeStatus('');
     } finally {
       setIsTranscribing(false);
+      setIsLoadingMore(false);
     }
   };
 
-  // Show more conversation (display next chunk)
-  const showMore = () => {
-    setShowUpTo(prev => prev + DISPLAY_CHUNK);
+  // Load all remaining chunks at once
+  const loadAllRemaining = async () => {
+    if (!whisperContextRef.current || isTranscribing) return;
+
+    setIsLoadingMore(true);
+    setIsTranscribing(true);
+    setTranscribeStatus('文字起こし中...');
+
+    try {
+      // Get full audio paths
+      const personAPath = await getAudioFilePath('personA');
+      const personBPath = await getAudioFilePath('personBTrimmed');
+
+      if (!personAPath || !personBPath) {
+        throw new Error('音声ファイルの読み込みに失敗しました');
+      }
+
+      // Transcribe remaining portion of personA
+      const startTime = transcribedUpTo;
+      let segsA = [];
+      let segsB = [];
+
+      const chunkAPath = await cutWavChunk(personAPath, startTime, totalAudioDuration);
+      if (chunkAPath) {
+        const { promise } = whisperContextRef.current.transcribe(chunkAPath, {
+          language: 'ja',
+          maxLen: 0,
+          tokenTimestamps: true,
+          temperature: 0,
+          temperatureInc: 0.2,
+          noSpeechThold: 0.6,
+        });
+        const result = await promise;
+        segsA = (result?.segments || []).map(s => ({
+          text: s.text?.trim() || '',
+          startTime: startTime + (s.t0 || 0) / 100,
+          endTime: startTime + (s.t1 || 0) / 100,
+          speaker: 'A',
+        }));
+        await RNFS.unlink(chunkAPath).catch(() => {});
+      }
+
+      // Transcribe remaining portion of personB
+      const personBStartInFile = Math.max(0, startTime - PERSON_B_OFFSET);
+      const personBEndInFile = totalAudioDuration - PERSON_B_OFFSET;
+
+      if (personBEndInFile > personBStartInFile) {
+        const chunkBPath = await cutWavChunk(personBPath, personBStartInFile, personBEndInFile);
+        if (chunkBPath) {
+          const { promise } = whisperContextRef.current.transcribe(chunkBPath, {
+            language: 'ja',
+            maxLen: 0,
+            tokenTimestamps: true,
+            temperature: 0,
+            temperatureInc: 0.2,
+            noSpeechThold: 0.6,
+          });
+          const result = await promise;
+          segsB = (result?.segments || []).map(s => ({
+            text: s.text?.trim() || '',
+            startTime: PERSON_B_OFFSET + personBStartInFile + (s.t0 || 0) / 100,
+            endTime: PERSON_B_OFFSET + personBStartInFile + (s.t1 || 0) / 100,
+            speaker: 'B',
+          }));
+          await RNFS.unlink(chunkBPath).catch(() => {});
+        }
+      }
+
+      const noise = ['(音楽)', '[音楽]', '♪', '🎵'];
+      const filterNoise = (seg) => seg.text.length > 0 && !noise.some(n => seg.text.includes(n));
+
+      const newSegments = [...segsA, ...segsB]
+        .filter(filterNoise)
+        .sort((a, b) => a.startTime - b.startTime);
+
+      console.log(`[Lazy] Loaded all remaining: ${newSegments.length} segments`);
+
+      setConversation(prev => [...prev, ...newSegments]);
+      setTranscribedUpTo(totalAudioDuration);
+      setTranscribeStatus('');
+    } catch (error) {
+      console.error('[Lazy] Load all error:', error);
+      Alert.alert('エラー', `文字起こし失敗: ${error.message}`);
+      setTranscribeStatus('');
+    } finally {
+      setIsTranscribing(false);
+      setIsLoadingMore(false);
+    }
   };
 
   // Audio player handlers
@@ -748,49 +944,51 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
           )}
         </View>
 
-        {/* Conversation Chat - show progressively */}
-        {hasTranscribed && conversation.length > 0 && (() => {
-          // Filter to show only up to showUpTo seconds
-          const visibleConversation = conversation.filter(item => item.startTime <= showUpTo);
-          const maxTime = Math.max(...conversation.map(item => item.endTime || item.startTime));
-          const hasMore = showUpTo < maxTime;
+        {/* Conversation Chat - lazy load */}
+        {conversation.length > 0 && (
+          <View style={styles.chatSection}>
+            <Text style={styles.chatTitle}>
+              会話内容 ({conversation.length}件 / ~{transcribedUpTo}秒まで)
+            </Text>
 
-          return (
-            <View style={styles.chatSection}>
-              <Text style={styles.chatTitle}>会話内容 ({visibleConversation.length}/{conversation.length}件)</Text>
+            {conversation.map((item, index) => (
+              <View
+                key={index}
+                style={item.speaker === 'A' ? styles.chatBubbleA : styles.chatBubbleB}
+              >
+                <View style={styles.chatHeader}>
+                  <Text style={[styles.chatSpeaker, { color: item.speaker === 'A' ? '#1976D2' : '#C2185B' }]}>
+                    {item.speaker === 'A' ? 'オペレーター' : 'お客様'}
+                  </Text>
+                  <Text style={styles.chatTime}>
+                    {item.startTime.toFixed(1)}s
+                  </Text>
+                </View>
+                <Text style={styles.chatText}>{item.text}</Text>
+              </View>
+            ))}
 
-              {visibleConversation.map((item, index) => (
-                <View
-                  key={index}
-                  style={item.speaker === 'A' ? styles.chatBubbleA : styles.chatBubbleB}
+            {/* Load More / Show All button */}
+            {transcribedUpTo < totalAudioDuration && !isTranscribing && (
+              <View style={styles.showMoreContainer}>
+                <TouchableOpacity
+                  style={styles.showMoreBtn}
+                  onPress={loadAllRemaining}
                 >
-                  <View style={styles.chatHeader}>
-                    <Text style={[styles.chatSpeaker, { color: item.speaker === 'A' ? '#1976D2' : '#C2185B' }]}>
-                      {item.speaker === 'A' ? 'オペレーター' : 'お客様'}
-                    </Text>
-                    <Text style={styles.chatTime}>
-                      {item.startTime.toFixed(1)}s
-                    </Text>
-                  </View>
-                  <Text style={styles.chatText}>{item.text}</Text>
-                </View>
-              ))}
+                  <Text style={styles.showMoreText}>すべて表示</Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
-              {/* Show All button */}
-              {hasMore && (
-                <View style={styles.showMoreContainer}>
-                  <TouchableOpacity
-                    style={styles.showMoreBtn}
-                    onPress={() => setShowUpTo(9999)}
-                  >
-                    <Text style={styles.showMoreText}>すべて表示</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-
-            </View>
-          );
-        })()}
+            {/* Loading indicator when loading more */}
+            {isLoadingMore && (
+              <View style={styles.loadingMoreContainer}>
+                <ActivityIndicator color="#1a7a6d" size="small" />
+                <Text style={styles.loadingMoreText}>文字起こし中...</Text>
+              </View>
+            )}
+          </View>
+        )}
 
         <View style={{ height: 40 }} />
       </ScrollView>
