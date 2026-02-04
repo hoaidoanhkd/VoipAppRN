@@ -31,8 +31,11 @@ const MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggm
 const MODEL_FILENAME = 'ggml-base.bin';
 const MODEL_EXPECTED_SIZE = 147951465; // ~142MB for base model
 
-// Progressive display settings
-const DISPLAY_CHUNK_SECONDS = 15; // Show first 15 seconds initially
+// Lazy transcription settings
+const INITIAL_SECONDS = 15; // Transcribe first 15 seconds initially
+const SAMPLE_RATE = 16000;
+const BYTES_PER_SAMPLE = 2;
+const NUM_CHANNELS = 1;
 
 
 // Audio files
@@ -192,10 +195,10 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeStatus, setTranscribeStatus] = useState('');
 
-  // Transcription states (eager load with progressive display)
+  // Transcription states (lazy load - transcribe on demand)
   const [conversation, setConversation] = useState([]);
-  const [showUpTo, setShowUpTo] = useState(DISPLAY_CHUNK_SECONDS); // Display up to this many seconds
-  const [hasTranscribed, setHasTranscribed] = useState(false);
+  const [isInitialOnly, setIsInitialOnly] = useState(true); // true = only first 15s transcribed
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   // Default data
   const data = {
@@ -227,8 +230,7 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     isMountedRef.current = true;
     // Reset transcription state on mount
     setConversation([]);
-    setShowUpTo(DISPLAY_CHUNK_SECONDS);
-    setHasTranscribed(false);
+    setIsInitialOnly(true);
     checkAndLoadModel();
     return () => {
       isMountedRef.current = false;
@@ -243,10 +245,10 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     };
   }, []);
 
-  // Auto-transcribe full audio when model is ready
+  // Auto-transcribe first 15 seconds when model is ready
   useEffect(() => {
-    if (modelReady && !hasTranscribed && !isTranscribing) {
-      transcribeFullAudio();
+    if (modelReady && conversation.length === 0 && !isTranscribing) {
+      transcribeInitial();
     }
   }, [modelReady]);
 
@@ -437,82 +439,192 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
     }
   };
 
-  // Transcribe full audio (eager load) - better quality than chunked approach
-  const transcribeFullAudio = async () => {
-    if (!whisperContextRef.current) {
-      Alert.alert('エラー', 'Whisperモデルをダウンロードしてください');
-      return;
+  // Helper: decode base64 to Uint8Array
+  const base64ToUint8Array = (base64) => {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  };
+
+  // Helper: encode Uint8Array to base64
+  const uint8ArrayToBase64 = (bytes) => {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  };
+
+  // Helper: find data chunk in WAV
+  const findDataChunk = (wavBytes) => {
+    for (let i = 12; i < Math.min(wavBytes.length - 8, 200); i++) {
+      if (wavBytes[i] === 0x64 && wavBytes[i+1] === 0x61 && wavBytes[i+2] === 0x74 && wavBytes[i+3] === 0x61) {
+        const dataSize = wavBytes[i+4] | (wavBytes[i+5] << 8) | (wavBytes[i+6] << 16) | (wavBytes[i+7] << 24);
+        return { dataSize, dataStart: i + 8 };
+      }
     }
+    return { dataSize: wavBytes.length - 44, dataStart: 44 };
+  };
+
+  // Cut WAV file to extract time range
+  const cutWavChunk = async (inputPath, startTime, endTime) => {
+    try {
+      const wavBase64 = await RNFS.readFile(inputPath, 'base64');
+      const wavBytes = base64ToUint8Array(wavBase64);
+      const { dataSize, dataStart } = findDataChunk(wavBytes);
+      const bytesPerSecond = SAMPLE_RATE * BYTES_PER_SAMPLE * NUM_CHANNELS;
+
+      const startOffset = Math.floor(startTime * bytesPerSecond);
+      const endOffset = Math.floor(endTime * bytesPerSecond);
+      const actualStart = dataStart + Math.min(startOffset, dataSize);
+      const actualEnd = dataStart + Math.min(endOffset, dataSize);
+      const dataLength = actualEnd - actualStart;
+
+      if (dataLength <= 0) return null;
+
+      // Build new WAV with 44-byte header
+      const newWav = new Uint8Array(44 + dataLength);
+      // RIFF header
+      [0x52,0x49,0x46,0x46].forEach((v,i) => newWav[i] = v);
+      const fileSize = 36 + dataLength;
+      newWav[4] = fileSize & 0xFF; newWav[5] = (fileSize >> 8) & 0xFF;
+      newWav[6] = (fileSize >> 16) & 0xFF; newWav[7] = (fileSize >> 24) & 0xFF;
+      [0x57,0x41,0x56,0x45,0x66,0x6D,0x74,0x20].forEach((v,i) => newWav[8+i] = v);
+      [16,0,0,0,1,0,1,0].forEach((v,i) => newWav[16+i] = v);
+      newWav[24] = SAMPLE_RATE & 0xFF; newWav[25] = (SAMPLE_RATE >> 8) & 0xFF;
+      newWav[26] = (SAMPLE_RATE >> 16) & 0xFF; newWav[27] = (SAMPLE_RATE >> 24) & 0xFF;
+      newWav[28] = bytesPerSecond & 0xFF; newWav[29] = (bytesPerSecond >> 8) & 0xFF;
+      newWav[30] = (bytesPerSecond >> 16) & 0xFF; newWav[31] = (bytesPerSecond >> 24) & 0xFF;
+      newWav[32] = 2; newWav[33] = 0; newWav[34] = 16; newWav[35] = 0;
+      [0x64,0x61,0x74,0x61].forEach((v,i) => newWav[36+i] = v);
+      newWav[40] = dataLength & 0xFF; newWav[41] = (dataLength >> 8) & 0xFF;
+      newWav[42] = (dataLength >> 16) & 0xFF; newWav[43] = (dataLength >> 24) & 0xFF;
+      for (let i = 0; i < dataLength; i++) newWav[44 + i] = wavBytes[actualStart + i];
+
+      const outPath = `${RNFS.DocumentDirectoryPath}/chunk_${startTime}_${endTime}.wav`;
+      await RNFS.writeFile(outPath, uint8ArrayToBase64(newWav), 'base64');
+      return outPath;
+    } catch (e) {
+      console.error('[WAV] Cut error:', e);
+      return null;
+    }
+  };
+
+  // Transcribe first 15 seconds only (fast initial load)
+  const transcribeInitial = async () => {
+    if (!whisperContextRef.current) return;
 
     setIsTranscribing(true);
     setTranscribeStatus('文字起こし中...');
 
     try {
-      // Get audio file paths
       const personAPath = await getAudioFilePath('personA');
       const personBPath = await getAudioFilePath('personBTrimmed');
+      if (!personAPath || !personBPath) throw new Error('音声ファイルの読み込みに失敗しました');
 
-      if (!personAPath || !personBPath) {
-        throw new Error('音声ファイルの読み込みに失敗しました');
+      let segsA = [], segsB = [];
+
+      // Cut and transcribe first 15s of Operator
+      const chunkA = await cutWavChunk(personAPath, 0, INITIAL_SECONDS);
+      if (chunkA) {
+        const { promise } = whisperContextRef.current.transcribe(chunkA, {
+          language: 'ja', maxLen: 0, tokenTimestamps: true,
+          temperature: 0, temperatureInc: 0.2, noSpeechThold: 0.6,
+        });
+        const result = await promise;
+        segsA = (result?.segments || []).map(s => ({
+          text: s.text?.trim() || '', startTime: (s.t0 || 0) / 100, endTime: (s.t1 || 0) / 100, speaker: 'A',
+        }));
+        await RNFS.unlink(chunkA).catch(() => {});
       }
 
-      // Transcribe full Operator audio
+      // Cut and transcribe first 8s of Customer (15s - 7s offset)
+      const customerEndTime = INITIAL_SECONDS - PERSON_B_OFFSET;
+      if (customerEndTime > 0) {
+        const chunkB = await cutWavChunk(personBPath, 0, customerEndTime);
+        if (chunkB) {
+          const { promise } = whisperContextRef.current.transcribe(chunkB, {
+            language: 'ja', maxLen: 0, tokenTimestamps: true,
+            temperature: 0, temperatureInc: 0.2, noSpeechThold: 0.6,
+          });
+          const result = await promise;
+          segsB = (result?.segments || []).map(s => ({
+            text: s.text?.trim() || '',
+            startTime: PERSON_B_OFFSET + (s.t0 || 0) / 100,
+            endTime: PERSON_B_OFFSET + (s.t1 || 0) / 100,
+            speaker: 'B',
+          }));
+          await RNFS.unlink(chunkB).catch(() => {});
+        }
+      }
+
+      const noise = ['(音楽)', '[音楽]', '♪', '🎵'];
+      const allSegs = [...segsA, ...segsB]
+        .filter(s => s.text.length > 0 && !noise.some(n => s.text.includes(n)))
+        .sort((a, b) => a.startTime - b.startTime);
+
+      console.log('[Initial] Segments:', allSegs.length);
+      setConversation(allSegs);
+      setIsInitialOnly(true);
+      setTranscribeStatus('');
+    } catch (error) {
+      console.error('[Initial] Error:', error);
+      Alert.alert('エラー', `文字起こし失敗: ${error.message}`);
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  // Transcribe FULL audio (when user wants all - better accuracy)
+  const transcribeFull = async () => {
+    if (!whisperContextRef.current || isTranscribing) return;
+
+    setIsLoadingMore(true);
+    setIsTranscribing(true);
+    setTranscribeStatus('文字起こし中...');
+
+    try {
+      const personAPath = await getAudioFilePath('personA');
+      const personBPath = await getAudioFilePath('personBTrimmed');
+      if (!personAPath || !personBPath) throw new Error('音声ファイルの読み込みに失敗しました');
+
+      // Transcribe FULL Operator audio
       const { promise: promiseA } = whisperContextRef.current.transcribe(personAPath, {
-        language: 'ja',
-        maxLen: 0,
-        tokenTimestamps: true,
-        temperature: 0,
-        temperatureInc: 0.2,
-        noSpeechThold: 0.6,
+        language: 'ja', maxLen: 0, tokenTimestamps: true,
+        temperature: 0, temperatureInc: 0.2, noSpeechThold: 0.6,
       });
       const resultA = await promiseA;
       const segsA = (resultA?.segments || []).map(s => ({
-        text: s.text?.trim() || '',
-        startTime: (s.t0 || 0) / 100,
-        endTime: (s.t1 || 0) / 100,
-        speaker: 'A',
+        text: s.text?.trim() || '', startTime: (s.t0 || 0) / 100, endTime: (s.t1 || 0) / 100, speaker: 'A',
       }));
-      console.log('[Transcribe] Operator segments:', segsA.length);
 
-      // Transcribe full Customer audio (trimmed version)
+      // Transcribe FULL Customer audio
       const { promise: promiseB } = whisperContextRef.current.transcribe(personBPath, {
-        language: 'ja',
-        maxLen: 0,
-        tokenTimestamps: true,
-        temperature: 0,
-        temperatureInc: 0.2,
-        noSpeechThold: 0.6,
+        language: 'ja', maxLen: 0, tokenTimestamps: true,
+        temperature: 0, temperatureInc: 0.2, noSpeechThold: 0.6,
       });
       const resultB = await promiseB;
-      // Add PERSON_B_OFFSET to customer timestamps (audio was trimmed)
       const segsB = (resultB?.segments || []).map(s => ({
         text: s.text?.trim() || '',
         startTime: PERSON_B_OFFSET + (s.t0 || 0) / 100,
         endTime: PERSON_B_OFFSET + (s.t1 || 0) / 100,
         speaker: 'B',
       }));
-      console.log('[Transcribe] Customer segments:', segsB.length);
 
-      // Filter out noise markers
       const noise = ['(音楽)', '[音楽]', '♪', '🎵'];
-      const filterNoise = (seg) => seg.text.length > 0 && !noise.some(n => seg.text.includes(n));
-
-      // Merge and sort by time
-      const allSegments = [...segsA, ...segsB]
-        .filter(filterNoise)
+      const allSegs = [...segsA, ...segsB]
+        .filter(s => s.text.length > 0 && !noise.some(n => s.text.includes(n)))
         .sort((a, b) => a.startTime - b.startTime);
 
-      console.log('[Transcribe] Total segments:', allSegments.length);
-
-      setConversation(allSegments);
-      setHasTranscribed(true);
+      console.log('[Full] Total segments:', allSegs.length);
+      setConversation(allSegs);
+      setIsInitialOnly(false);
       setTranscribeStatus('');
     } catch (error) {
-      console.error('[Transcribe] Error:', error);
+      console.error('[Full] Error:', error);
       Alert.alert('エラー', `文字起こし失敗: ${error.message}`);
-      setTranscribeStatus('');
     } finally {
       setIsTranscribing(false);
+      setIsLoadingMore(false);
     }
   };
 
@@ -677,50 +789,46 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
           )}
         </View>
 
-        {/* Conversation Chat - progressive display */}
-        {hasTranscribed && conversation.length > 0 && (() => {
-          // Filter to show only up to showUpTo seconds
-          const visibleConversation = conversation.filter(item => item.startTime <= showUpTo);
-          const maxTime = Math.max(...conversation.map(item => item.endTime || item.startTime));
-          const hasMore = showUpTo < maxTime;
+        {/* Conversation Chat */}
+        {conversation.length > 0 && (
+          <View style={styles.chatSection}>
+            <Text style={styles.chatTitle}>通話内容</Text>
 
-          return (
-            <View style={styles.chatSection}>
-              <Text style={styles.chatTitle}>
-                会話内容 ({visibleConversation.length}/{conversation.length}件)
-              </Text>
-
-              {visibleConversation.map((item, index) => (
-                <View
-                  key={index}
-                  style={item.speaker === 'A' ? styles.chatBubbleA : styles.chatBubbleB}
-                >
-                  <View style={styles.chatHeader}>
-                    <Text style={[styles.chatSpeaker, { color: item.speaker === 'A' ? '#1976D2' : '#C2185B' }]}>
-                      {item.speaker === 'A' ? 'オペレーター' : 'お客様'}
-                    </Text>
-                    <Text style={styles.chatTime}>
-                      {item.startTime.toFixed(1)}s
-                    </Text>
-                  </View>
-                  <Text style={styles.chatText}>{item.text}</Text>
+            {conversation.map((item, index) => (
+              <View
+                key={index}
+                style={item.speaker === 'A' ? styles.chatBubbleA : styles.chatBubbleB}
+              >
+                <View style={styles.chatHeader}>
+                  <Text style={[styles.chatSpeaker, { color: item.speaker === 'A' ? '#1976D2' : '#C2185B' }]}>
+                    {item.speaker === 'A' ? 'オペレーター' : 'お客様'}
+                  </Text>
+                  <Text style={styles.chatTime}>
+                    {item.startTime.toFixed(1)}s
+                  </Text>
                 </View>
-              ))}
+                <Text style={styles.chatText}>{item.text}</Text>
+              </View>
+            ))}
 
-              {/* Show All button */}
-              {hasMore && (
-                <View style={styles.showMoreContainer}>
-                  <TouchableOpacity
-                    style={styles.showMoreBtn}
-                    onPress={() => setShowUpTo(9999)}
-                  >
-                    <Text style={styles.showMoreText}>すべて表示</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-            </View>
-          );
-        })()}
+            {/* Show more button - only when initial transcription */}
+            {isInitialOnly && !isTranscribing && (
+              <View style={styles.showMoreContainer}>
+                <TouchableOpacity style={styles.showMoreBtn} onPress={transcribeFull}>
+                  <Text style={styles.showMoreText}>すべて表示</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Loading indicator */}
+            {isLoadingMore && (
+              <View style={styles.loadingMoreContainer}>
+                <ActivityIndicator color="#1a7a6d" size="small" />
+                <Text style={styles.loadingMoreText}>文字起こし中...</Text>
+              </View>
+            )}
+          </View>
+        )}
 
         <View style={{ height: 40 }} />
       </ScrollView>
