@@ -762,8 +762,8 @@ const CallDetailScreen = ({ callData = {}, onBack }) => {
             </TouchableOpacity>
           </View>
 
-          {/* Transcribe Status - inside player */}
-          {modelReady && isTranscribing && (
+          {/* Transcribe Status - inside player (hide when loading more, shown at bottom instead) */}
+          {modelReady && isTranscribing && !isLoadingMore && (
             <View style={styles.transcribeStatusBar}>
               <ActivityIndicator color="#1a7a6d" size="small" />
               <Text style={styles.transcribeStatusText}>{transcribeStatus || '処理中...'}</Text>
